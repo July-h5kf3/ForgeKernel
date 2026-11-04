@@ -317,7 +317,10 @@ def _scripts_copy(tmp_path):
     for f in ("agent-claude.sh", "timeout-run.py"):
         shutil.copy(_ROOT / "scripts" / f, d / f)
     # the goal session replaced by a recorder: which args reached it
-    (d / "claude-goal.sh").write_text('#!/usr/bin/env bash\ncat >/dev/null\necho "GOAL $*"\n')
+    (d / "claude-goal.py").write_text(
+        '#!/usr/bin/env python3\nimport sys\nsys.stdin.read()\nprint("GOAL " + " ".join(sys.argv[1:]))\n'
+    )
+    (d / "claude-goal.py").chmod(0o755)
     return d
 
 
@@ -349,8 +352,8 @@ def test_the_agent_scripts_pass_the_agent_policys_command_scan():
     scripts must not trip it."""
     sys.path.insert(0, str(_ROOT / "src"))
     from forgekernel.loop.agent_policy import command_findings
-    for f in ("agent-claude.sh", "claude-goal.sh"):
-        assert command_findings([f"bash {_ROOT / 'scripts' / f} m m"], {}) == [], f
+    assert command_findings([f"bash {_ROOT / 'scripts' / 'agent-claude.sh'} m m"], {}) == []
+    assert command_findings([f"python3 {_ROOT / 'scripts' / 'claude-goal.py'} m m"], {}) == []
 
 
 def test_goal_leg_findings():
@@ -358,7 +361,7 @@ def test_goal_leg_findings():
     from forgekernel.loop.cli import goal_leg_findings
     scripts = _ROOT / "scripts"
     assert goal_leg_findings([f"bash {scripts / 'agent-claude.sh'} m high 600"], {}) == []
-    assert goal_leg_findings([f"bash {scripts / 'claude-goal.sh'} m m"], {}) == []
+    assert goal_leg_findings([f"python3 {scripts / 'claude-goal.py'} m m"], {}) == []
     # a plain claude -p command
     f = goal_leg_findings(["claude -p --model x"], {})
     assert len(f) == 1 and "claude -p" in f[0]

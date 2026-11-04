@@ -463,7 +463,7 @@ Trade-offs made in implementation, and where the result departs from the text ab
    pricing, stall and the timeline, read `meta_workloads`, which now lists every shape.
 7. **Agent commands**: built in one place, `scripts/agent-claude.sh`; an ordinary turn is `claude -p`
    under a wall-clock timeout, and when /goal is needed (`FK_AGENT_DRIVER=goal`) it hands over to
-   `scripts/claude-goal.sh`. A /goal session needs tmux.
+   `scripts/claude-goal.py`. A /goal session needs tmux.
 8. **Self-evolution**: `scripts/self_evolve.py`. Only `cutedsl` tasks for now (the next generation's
    reference is sealed as Python source).
 9. **Leaderboard tasks**: `forge init <op> --leaderboard …` generates the card (and the recon tree of a

@@ -3,7 +3,7 @@
 
     python3 claude-goal.py <expected-model> <model-flag> [extra claude args...]
       prompt on stdin, reply on stdout — the contract of scripts/agent-claude.sh,
-      which dispatches here when its caller asks for a goal session
+      which dispatches here directly when its caller asks for a goal session
       (FK_AGENT_DRIVER=goal; today the ref_from_goal session, loop/goal_ref.py).
 
 What changes against `claude -p`: the turn is an interactive session in its own tmux

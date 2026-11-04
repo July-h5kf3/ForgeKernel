@@ -148,7 +148,7 @@ def _end_process_group(proc: subprocess.Popen, grace_s: float = 8.0) -> None:
 
 
 
-# A /goal session is served by scripts/claude-goal.sh; scripts/agent-claude.sh hands a
+# A /goal session is served by scripts/claude-goal.py; scripts/agent-claude.sh hands a
 # turn to it when the caller sets FK_AGENT_DRIVER=goal.
 _GOAL_DRIVER_MARK = "claude-goal"
 
@@ -158,7 +158,7 @@ def goal_leg_findings(cmds: list[str | None], env: dict[str, str],
     """Why these agent commands would serve a /goal session as `claude -p` instead.
 
     A caller asks for a goal session with FK_AGENT_DRIVER=goal; it is one only when the
-    command, or a script it names, reaches scripts/claude-goal.sh. Static, one level
+    command, or a script it names, reaches scripts/claude-goal.py. Static, one level
     deep, like the policy's command_findings: a script that builds its command at
     runtime is not seen."""
     from forgekernel.loop.agentctx import _SCRIPT_TOKEN, _expand
@@ -183,7 +183,7 @@ def goal_leg_findings(cmds: list[str | None], env: dict[str, str],
         if any(_GOAL_DRIVER_MARK in body for body in [cmd, *scripts_in(cmd)]):
             continue
         findings.append("agent command: does not run scripts/agent-claude.sh or "
-                        "scripts/claude-goal.sh, so it runs as written (claude -p)")
+                        "scripts/claude-goal.py, so it runs as written (claude -p)")
     return list(dict.fromkeys(findings))
 
 # Server-side API trouble the agent CLI surfaces as a non-zero exit: overload (529),
@@ -1850,7 +1850,7 @@ def _goal_ref_agent_problem(args) -> str | None:
     """Why no agent command here can serve the reference session as a /goal session
     (None when one can). It runs on the teacher's command (the student's when there is
     no teacher command), under the student's rules; a command that never reaches
-    scripts/claude-goal.sh would serve it as one `claude -p` turn, which is not the session the
+    scripts/claude-goal.py would serve it as one `claude -p` turn, which is not the session the
     budget, the deadline and the deliverable check are built for."""
     cmd = getattr(args, "teacher_agent_cmd", None) or args.agent_cmd
     if not cmd:

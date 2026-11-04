@@ -8,7 +8,7 @@
 # stream that opens and then never delivers its last frame would hang the run with it.
 # A caller that needs a /goal session (loop/goal_ref.py, when a task has no reference)
 # sets FK_AGENT_DRIVER=goal; the turn is then an interactive claude driven by /goal
-# (scripts/claude-goal.sh), with the same model and arguments.
+# (scripts/claude-goal.py), with the same model and arguments.
 #
 # Credentials come from the environment (local.env): ANTHROPIC_API_KEY or
 # CLAUDE_CODE_OAUTH_TOKEN, or the CLI's own login (provider = "native"). Another provider
@@ -38,6 +38,6 @@ if [ -n "$EFFORT" ]; then
 fi
 
 if [ "${FK_AGENT_DRIVER:-}" = "goal" ]; then
-    exec bash "$HERE/claude-goal.sh" "$MODEL" "$MODEL" "${ARGS[@]}"
+    exec "$PY" "$HERE/claude-goal.py" "$MODEL" "$MODEL" "${ARGS[@]}"
 fi
 exec "$PY" "$HERE/timeout-run.py" "$TIMEOUT" "${FK_CLAUDE_BIN:-claude}" -p --model "$MODEL" "${ARGS[@]}"
