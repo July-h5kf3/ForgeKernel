@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kernel Agent Loop</title>
+<style>
+:root {
+  --bg: #0b0f0d;
+  --surface: #111a15;
+  --surface-2: #16211a;
+  --surface-3: #0e140f;
+  --green: #76b900;
+  --green-bright: #a6ff00;
+  --green-line: #3d6b35;
+  --white: #f4f7f5;
+  --text: #d7ded9;
+  --muted: #8f9a93;
+  --faint: #5e6a63;
+  --line: #26392c;
+  --amber: #c5e275;
+  --danger: #ef9a83;
+  font-family: "Hiragino Sans GB", "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  min-width: 320px;
+}
+.page {
+  width: min(1440px, 100%);
+  margin: 0 auto;
+  padding: 28px 34px 34px;
+}
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 6px 0 22px 18px;
+  border-left: 6px solid var(--green);
+  border-bottom: 1px solid var(--line);
+}
+.eyebrow {
+  color: var(--green);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+h1 {
+  margin: 0;
+  color: var(--white);
+  font-size: clamp(26px, 3.2vw, 46px);
+  line-height: 1.12;
+  font-weight: 500;
+}
+.subtitle {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: clamp(14px, 1.5vw, 18px);
+}
+.header-mark {
+  color: var(--faint);
+  font-size: 11px;
+  letter-spacing: .08em;
+  white-space: nowrap;
+  padding-top: 10px;
+}
+.stage-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 14px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: .02em;
+}
+.stage-key span { color: var(--green); font-weight: 700; margin-right: 3px; }
+.diagram-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(320px, .85fr);
+  gap: 22px;
+  align-items: stretch;
+  margin-top: 22px;
+}
+.diagram {
+  min-width: 0;
+  border: 1px solid var(--line);
+  background: radial-gradient(circle at 50% 45%, rgba(118,185,0,.07), transparent 42%), var(--surface-3);
+  border-radius: 16px;
+  padding: 12px;
+}
+.diagram svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 500px;
+}
+svg text { font-family: inherit; }
+.node { cursor: pointer; outline: none; }
+.node rect, .node polygon { transition: fill .18s ease, stroke .18s ease, filter .18s ease; }
+.node:hover rect, .node:focus rect, .node:hover polygon, .node:focus polygon,
+.node.is-selected rect, .node.is-selected polygon {
+  fill: #1a2a1b;
+  stroke: var(--green-bright);
+  filter: drop-shadow(0 0 8px rgba(118,185,0,.3));
+}
+.node-title { fill: var(--white); font-size: 18px; font-weight: 500; }
+.node-subtitle { fill: var(--green); font-size: 11px; font-weight: 500; }
+.node-body { fill: var(--text); font-size: 12px; }
+.node-ref { fill: var(--muted); font-size: 10px; }
+.node-number { fill: var(--bg); font-size: 11px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; }
+.loop-label { fill: var(--green); font-size: 14px; font-weight: 500; letter-spacing: .04em; text-anchor: middle; }
+.loop-caption { fill: var(--text); font-size: 13px; text-anchor: middle; }
+.section-label { fill: var(--green); font-size: 11px; font-weight: 500; letter-spacing: .06em; }
+.path-main { stroke: var(--green); stroke-width: 2.5; fill: none; marker-end: url(#arrow-green); }
+.path-return { stroke: var(--muted); stroke-width: 1.8; fill: none; stroke-dasharray: 7 7; marker-end: url(#arrow-muted); }
+.path-guide { stroke: var(--green-line); stroke-width: 1; fill: none; }
+.detail {
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--green-line);
+  border-radius: 16px;
+  padding: 22px 22px 20px;
+  display: flex;
+  flex-direction: column;
+}
+.detail-kicker { color: var(--green); font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.detail h2 { color: var(--white); font-size: clamp(20px, 2vw, 28px); font-weight: 500; margin: 8px 0 4px; line-height: 1.2; }
+.detail-subtitle { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+.detail-list { margin: 0; padding-left: 18px; display: grid; gap: 11px; }
+.detail-list li { color: var(--text); font-size: 14px; line-height: 1.45; }
+.detail-list li::marker { color: var(--green); }
+.detail-list a { color: var(--green-bright); text-decoration: none; }
+.detail-list a:hover, .detail-list a:focus { text-decoration: underline; }
+.current-label { margin-top: auto; padding-top: 20px; color: var(--green); font-size: 12px; font-weight: 700; }
+.current-work {
+  width: 100%;
+  min-height: 82px;
+  resize: vertical;
+  margin-top: 8px;
+  padding: 10px 11px;
+  border: 1px dashed var(--green-line);
+  border-radius: 10px;
+  background: #0d130f;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.current-work:focus { outline: 2px solid var(--green); outline-offset: 2px; }
+.save-note { color: var(--faint); font-size: 11px; margin-top: 7px; }
+.footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  border-top: 1px solid var(--line);
+  margin-top: 18px;
+  padding-top: 14px;
+  color: var(--faint);
+  font-size: 12px;
+}
+.footer strong { color: var(--text); font-weight: 500; }
+@media (max-width: 1000px) {
+  .diagram-shell { grid-template-columns: 1fr; }
+  .detail { min-height: 320px; }
+  .diagram svg { min-height: 0; }
+}
+@media (max-width: 640px) {
+  .page { padding: 18px 14px 24px; }
+  .header { padding-left: 13px; }
+  .header-mark { display: none; }
+  .diagram { padding: 5px; border-radius: 12px; }
+  .detail { padding: 18px; border-radius: 12px; }
+  .footer { flex-direction: column; gap: 7px; }
+}
+</style>
+</head>
+<body>
+<main class="page" id="kernel-agent-loop">
+  <header class="header">
+    <div>
+      <div class="eyebrow">KERNEL AGENT</div>
+      <h1>Kernel Agent Loop</h1>
+      <div class="subtitle">R · P · I · V · M · D：从参考实现到高性能 Kernel 的闭环优化流程</div>
+      <div class="stage-key" aria-label="Stage names"><span>R</span> Reference <span>P</span> Profile <span>I</span> Insight <span>V</span> Verify <span>M</span> Merge <span>D</span> Deliver <span>G</span> Gate</div>
+    </div>
+    <div class="header-mark">点击节点查看相关工作 · 当前工作可直接编辑</div>
+  </header>
+
+  <section class="diagram-shell" aria-label="Kernel Agent Loop interactive diagram">
+    <div class="diagram">
+      <svg viewBox="0 0 1180 600" role="img" aria-labelledby="diagram-title diagram-desc">
+        <title id="diagram-title">Kernel Agent Loop</title>
+        <desc id="diagram-desc">从 Reference 开始，经过 Profile、Insight、Verify、Merge 和 Gate，最后 Deliver。点击节点查看相关论文分类。</desc>
+        <defs>
+          <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--green)" />
+          </marker>
+          <marker id="arrow-muted" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto" markerUnits="strokeWidth">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="var(--muted)" />
+          </marker>
+        </defs>
+
+        <text class="section-label" x="22" y="42">R · REFERENCE</text>
+        <text class="section-label" x="250" y="42">P · I · V · M · G</text>
+        <text class="section-label" x="940" y="42">D · DELIVER</text>
+        <path class="path-guide" d="M250 58 H890" />
+
+        <path class="path-main" d="M190 282 H220 V155 H250" />
+        <path class="path-main" d="M470 155 H525" />
+        <path class="path-main" d="M635 225 V292" />
+        <path class="path-main" d="M525 357 H470" />
+        <path class="path-main" d="M470 357 H490 V450 H850 V357 H875" />
+        <path class="path-main" d="M975 357 H1005 V254 H955" />
+        <path class="path-return" d="M925 407 V530 H205 V155 H250" />
+        <text class="node-ref" x="625" y="555" text-anchor="middle">未达标：回到 profiling</text>
+        <text class="node-ref" x="1004" y="337" text-anchor="middle">达标</text>
+
+        <g class="node" data-node="baseline" tabindex="0" role="button" aria-label="Reference (R)：参考实现">
+          <rect x="20" y="222" width="170" height="120" rx="14" fill="var(--surface-2)" stroke="var(--green-line)" stroke-width="1.5" />
+          <text class="node-number" x="43" y="247">R</text>
+          <text class="node-title" x="62" y="253">Reference</text>
+          <text class="node-body" x="42" y="286">参考实现</text>
+          <text class="node-body" x="42" y="305">初始性能数据</text>
+          <text class="node-ref" x="42" y="329">baseline kernel</text>
+        </g>
+
+        <g class="node" data-node="profiling" tabindex="0" role="button" aria-label="Profile (P)：采集与反馈形式">
+          <rect x="250" y="90" width="220" height="130" rx="14" fill="var(--surface)" stroke="var(--green-line)" stroke-width="1.5" />
+          <rect x="250" y="90" width="7" height="130" rx="4" fill="var(--green)" />
+          <circle cx="280" cy="115" r="16" fill="var(--green)" />
+          <text class="node-number" x="280" y="115">P</text>
+          <text class="node-title" x="307" y="117">Profile</text>
+          <text class="node-subtitle" x="307" y="137">采集与反馈形式</text>
+          <text class="node-body" x="270" y="166">采集策略 / IR / 性能余量</text>
+          <text class="node-ref" x="270" y="193">点击查看 AutoProfiler、TileCas、SOL</text>
+        </g>
+
+        <g class="node" data-node="insight" tabindex="0" role="button" aria-label="Insight (I)：知识库与经验积累">
+          <rect x="525" y="90" width="220" height="130" rx="14" fill="var(--surface)" stroke="var(--green-line)" stroke-width="1.5" />
+          <rect x="525" y="90" width="7" height="130" rx="4" fill="var(--green)" />
+          <circle cx="555" cy="115" r="16" fill="var(--green)" />
+          <text class="node-number" x="555" y="115">I</text>
+          <text class="node-title" x="582" y="117">Insight</text>
+          <text class="node-subtitle" x="582" y="137">知识库与经验积累</text>
+          <text class="node-body" x="545" y="166">Wiki / 经验 / Ref / IR</text>
+          <text class="node-ref" x="545" y="193">点击查看 KernelClaw、AccelOpt、ForgeKernel</text>
+        </g>
+
+        <g class="node" data-node="validation" tabindex="0" role="button" aria-label="Verify (V)：多卡并行验证">
+          <rect x="525" y="292" width="220" height="130" rx="14" fill="var(--surface)" stroke="var(--green-line)" stroke-width="1.5" />
+          <rect x="525" y="292" width="7" height="130" rx="4" fill="var(--green)" />
+          <circle cx="555" cy="317" r="16" fill="var(--green)" />
+          <text class="node-number" x="555" y="317">V</text>
+          <text class="node-title" x="582" y="319">Verify</text>
+          <text class="node-subtitle" x="582" y="339">多卡并行验证</text>
+          <text class="node-body" x="545" y="368">批量编译、运行与结果聚合</text>
+          <text class="node-ref" x="545" y="395">点击查看 PyTorch KernelAgent</text>
+        </g>
+
+        <g class="node" data-node="merge" tabindex="0" role="button" aria-label="Merge (M)：归并、学习与判定">
+          <rect x="250" y="292" width="220" height="130" rx="14" fill="var(--surface)" stroke="var(--green-line)" stroke-width="1.5" />
+          <rect x="250" y="292" width="7" height="130" rx="4" fill="var(--green)" />
+          <circle cx="280" cy="317" r="16" fill="var(--green)" />
+          <text class="node-number" x="280" y="317">M</text>
+          <text class="node-title" x="307" y="319">Merge</text>
+          <text class="node-subtitle" x="307" y="339">归并 / 学习 / 判定</text>
+          <text class="node-body" x="270" y="368">候选归并 / 知识更新 / 退出判定</text>
+          <text class="node-ref" x="270" y="395">点击查看可插入的方法位置</text>
+        </g>
+
+        <ellipse cx="510" cy="255" rx="108" ry="46" fill="#101712" stroke="var(--green-line)" stroke-width="2" />
+        <text class="loop-label" x="510" y="249">KERNEL AGENT LOOP</text>
+        <text class="loop-caption" x="510" y="271">测量 / 推理 / 验证 / 学习</text>
+
+        <g class="node" data-node="delivery" tabindex="0" role="button" aria-label="Deliver (D)：交付与总结">
+          <rect x="955" y="194" width="205" height="120" rx="14" fill="var(--green)" stroke="var(--green-bright)" stroke-width="1.5" />
+          <text class="node-title" x="978" y="228" fill="var(--bg)">Deliver</text>
+          <text class="node-body" x="978" y="258" fill="var(--bg)">交付与总结</text>
+          <text class="node-ref" x="978" y="290" fill="#193000">点击查看 HPCAgent-Bench、KernelBench</text>
+        </g>
+
+        <g class="node" data-node="decision" tabindex="0" role="button" aria-label="Gate (G)：达到目标判断">
+          <polygon points="875,357 925,307 975,357 925,407" fill="var(--surface-2)" stroke="var(--green)" stroke-width="2" />
+          <text class="node-title" x="925" y="348" text-anchor="middle" font-size="13">G · GATE</text>
+          <text class="node-title" x="925" y="370" text-anchor="middle" font-size="14">达标？</text>
+        </g>
+      </svg>
+    </div>
+
+    <aside class="detail" aria-live="polite">
+      <div class="detail-kicker" id="detail-kicker">SELECT A NODE</div>
+      <h2 id="detail-title">点击节点查看相关工作</h2>
+      <div class="detail-subtitle" id="detail-subtitle">主循环保留在左侧；论文分类和可编辑占位会显示在这里。</div>
+      <ul class="detail-list" id="detail-list">
+        <li>选择 Profile 查看采集策略、IR 反馈和性能余量。</li>
+        <li>选择 Insight 查看知识库、经验积累、Ref 型和 IR 型工作。</li>
+        <li>选择 Deliver 查看评测可信性和 benchmark。</li>
+      </ul>
+      <label class="current-label" for="current-work">当前工作</label>
+      <textarea id="current-work" class="current-work" placeholder="在这里补充你们当前在该环节的工作"></textarea>
+      <div class="save-note" id="save-note">内容会保存在当前浏览器中。</div>
+    </aside>
+  </section>
+
+  <footer class="footer">
+    <div><strong>映射原则：</strong>代表性工作按主要贡献所在环节归类；跨环节系统放在最相关位置。</div>
+    <div>节点、文字和当前工作内容均可编辑</div>
+  </footer>
+</main>
+<script>
+(() => {
+  const root = document.getElementById('kernel-agent-loop');
+  const nodes = [...root.querySelectorAll('.node[data-node]')];
+  const kicker = root.querySelector('#detail-kicker');
+  const title = root.querySelector('#detail-title');
+  const subtitle = root.querySelector('#detail-subtitle');
+  const list = root.querySelector('#detail-list');
+  const work = root.querySelector('#current-work');
+  const saveNote = root.querySelector('#save-note');
+  const storeKey = 'kernel-agent-loop-current-work-v1';
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(storeKey) || '{}'); } catch (_) { saved = {}; }
+
+  const sources = {
+    auto: ['AutoProfiler / Less Is More', 'https://arxiv.org/html/2610.36576v1'],
+    tilecas: ['TileCas', 'https://arxiv.org/html/2610.14740v2'],
+    sol: ['μCUTLASS + Speed-of-Light Guidance', 'https://arxiv.org/html/2603.29010v1'],
+    claw: ['KernelClaw', 'https://arxiv.org/html/2603.10085v2'],
+    accel: ['AccelOpt', 'https://arxiv.org/html/2511.15915v2'],
+    forge: ['ForgeKernel', 'https://github.com/OpenBMB/ForgeKernel'],
+    pytorch: ['PyTorch KernelAgent', 'https://pytorch.org/blog/kernelagent-hardware-guided-gpu-kernel-optimization-via-multi-agent-orchestration/'],
+    hpca: ['HPCAgent-Bench', 'https://arxiv.org/html/2610.20673v1'],
+    bench: ['KernelBench', 'https://github.com/ScalingIntelligence/KernelBench']
+  };
+  const link = key => {
+    const [label, href] = sources[key];
+    return `<a href="${href}" target="_blank" rel="noreferrer">${label}</a>`;
+  };
+  const details = {
+    baseline: {
+      kicker: 'R · REFERENCE',
+      title: 'Reference：参考实现',
+      subtitle: '为每一轮优化提供正确性基线和初始性能数据。',
+      items: ['正确性基线：保证候选 kernel 可比较。', '初始性能数据：作为后续 profiling 和 speedup 对比的参照。']
+    },
+    profiling: {
+      kicker: 'P · PROFILE',
+      title: 'Profile：采集与反馈形式',
+      subtitle: 'profiling 不只是“收集更多指标”，还包括选择什么信息，以及用什么形式反馈给 agent。',
+      items: [
+        `采集什么：roofline 导向、按 kernel 选择硬件指标、树式 profiling policy。代表工作：${link('auto')}`,
+        `IR 反馈：把错误与性能关联到不同抽象层，支持跨层诊断和搜索分支回访。代表工作：${link('tilecas')}`,
+        `性能余量：用第一性原理性能上界估计 headroom，减少无效 token 和无收益试验。代表工作：${link('sol')}`
+      ]
+    },
+    insight: {
+      kicker: 'I · INSIGHT',
+      title: 'Insight：知识库与经验积累',
+      subtitle: 'profiling 信息与专家知识库共同构成下一步优化方向的 context。',
+      items: [
+        `Wiki / skill：显式专家知识与任务轨迹记忆。代表工作：${link('claw')}`,
+        `跨任务与任务内积累：记录 slow-fast pair 和 optimization memory。代表工作：${link('accel')}`,
+        `Ref 型：理解参考实现架构，用 GPU probe 实证硬件机制，并按架构沉淀知识。代表工作：${link('forge')}`,
+        'IR 型：把优化过程中积累的经验形式化为新的 IR。代表工作：CAKE、CANNBot。'
+      ]
+    },
+    validation: {
+      kicker: 'V · VERIFY',
+      title: 'Verify：多卡并行验证',
+      subtitle: '同一批候选方向并行编译、运行和聚合结果，减少验证等待。',
+      items: [
+        `集中同批候选：批量调度候选、聚合硬件信号，并把结果回传给多 agent 协作流程。代表工作：${link('pytorch')}`,
+        '可继续补充：资源分配、失败聚类、跨卡一致性和验证预算。'
+      ]
+    },
+    merge: {
+      kicker: 'M · MERGE',
+      title: 'Merge：归并、学习与判定',
+      subtitle: '目前尚未找到明确的代表性工作，可作为研究空位。',
+      items: [
+        '候选归并：从多个有效方向中选择最有价值的组合。',
+        '知识更新：把本轮经验沉淀为可复用规则或结构化知识。',
+        '达标判定：决定是否退出循环，或返回 profiling 开始下一轮。'
+      ]
+    },
+    delivery: {
+      kicker: 'D · DELIVER',
+      title: 'Deliver：交付与总结',
+      subtitle: '交付阶段需要同时保证评测可信性、端到端收益和结果可复现。',
+      items: [
+        `反 reward hack：统一 C ABI / Python 接口，由外部裁判在隐藏样例上测试。代表工作：${link('hpca')}`,
+        `更丰富的 benchmark：同时检查正确性与 speedup，覆盖单 kernel、融合和端到端模型。代表工作：${link('bench')}`
+      ]
+    },
+    decision: {
+      kicker: 'G · GATE',
+      title: 'Gate：达到目标？',
+      subtitle: '达标则交付；未达标则回到 profiling。',
+      items: ['判定条件可以包含正确性、性能门槛、稳定性、可复现性和机制证据。']
+    }
+  };
+
+  let current = 'profiling';
+  function render(nodeKey) {
+    const d = details[nodeKey] || details.profiling;
+    current = nodeKey;
+    nodes.forEach(n => n.classList.toggle('is-selected', n.dataset.node === nodeKey));
+    kicker.textContent = d.kicker;
+    title.textContent = d.title;
+    subtitle.textContent = d.subtitle;
+    list.innerHTML = d.items.map(item => `<li>${item}</li>`).join('');
+    work.value = saved[nodeKey] || '';
+    saveNote.textContent = saved[nodeKey] ? '已恢复当前浏览器保存的内容。' : '内容会保存在当前浏览器中。';
+  }
+  function activate(node) { render(node.dataset.node); }
+  nodes.forEach(node => {
+    node.addEventListener('click', () => activate(node));
+    node.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(node); }
+    });
+  });
+  work.addEventListener('input', () => {
+    saved[current] = work.value;
+    try { localStorage.setItem(storeKey, JSON.stringify(saved)); } catch (_) {}
+    saveNote.textContent = '已保存到当前浏览器。';
+  });
+  render('profiling');
+})();
+</script>
+</body>
+</html>
