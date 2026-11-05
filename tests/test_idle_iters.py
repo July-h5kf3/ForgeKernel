@@ -388,14 +388,6 @@ def test_reading_of_round_trips_and_old_rows_read_none(tmp_path):
     assert a.reading_of == 1 and b.reading_of is None
 
 
-def test_loop_toml_reuse_mode_parsing():
-    from forgekernel.loop.cli import _reuse_mode
-    assert _reuse_mode("all") == "all" and _reuse_mode(" Gate ") == "gate"
-    assert _reuse_mode(True) == "all" and _reuse_mode(False) == "off" and _reuse_mode("off") == "off"
-    with pytest.raises(SystemExit):
-        _reuse_mode("sometimes")
-
-
 def test_real_backend_lists_a_commits_changes(tmp_path):
     from forgekernel.loop.cli import RealBackend
 

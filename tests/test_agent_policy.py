@@ -510,26 +510,16 @@ def test_the_agent_policy_exit_code_means_nothing_else():
         0, cli.EXIT_WINDOW_UNDECLARED, cli.EXIT_KB_ARCH_MISSING}
 
 
-def test_a_source_teacher_is_denied_the_declared_other_implementations_only_on_request(tmp_path):
-    """[loop] source_teacher_denies_ref: a source-mode run whose ref_source_paths / urls name
-    OTHER implementations (earlier runs, sister libraries) denies them to the teacher too;
-    without the key a source teacher is denied nothing, as before."""
+def test_a_source_teacher_is_denied_nothing(tmp_path):
+    """A source-mode run's teacher distils FROM the reference: the declared paths and
+    URLs are denied to the student only."""
     ref = tmp_path / "refs" / "Other"
     ref.mkdir(parents=True)
     base = {"ref_source_paths": [str(ref)], "ref_source_urls": ["github.com/org/Other"]}
-    ws = tmp_path / "ws"
     plain = ap.from_config({"loop": dict(base)}, oracle_mode="source",
                            repo_root=tmp_path / "run", teacher_trees=[])
     assert plain.deny_read("teacher") == [] and plain.deny_urls("teacher") == []
-    on = ap.from_config({"loop": {**base, "source_teacher_denies_ref": True}}, oracle_mode="source",
-                        repo_root=tmp_path / "run", teacher_trees=[])
-    assert ref.resolve() in on.deny_read("teacher")
-    assert on.deny_urls("teacher") == ["github.com/org/Other"]
-    s = on.settings("teacher", ws)
-    assert str(ref.resolve()) in s["sandbox"]["filesystem"]["denyRead"]
-    assert "WebFetch" not in s["permissions"]["deny"]          # still online
-    assert s["hooks"]["PreToolUse"][0]["hooks"][0]["command"].count("agent_policy_hook.py")
-    assert "Ready-made implementations of the same kind of operator" in on.notice("teacher")
+    assert ref.resolve() in plain.deny_read("student")
 
 
 def test_the_oracle_lint_tokens_can_be_turned_off_per_run(tmp_path):

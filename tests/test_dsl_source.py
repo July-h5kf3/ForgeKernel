@@ -1,7 +1,7 @@
 """An empty ``[loop] dsl_source_dirs`` on a cutedsl run defaults to the DSL
-distribution installed here (loop/dsl_source.py) — checked against the job's
-``DSL_PIN`` and the declared reference source — and the student's policy carries
-the result. A declared list is used as written."""
+distribution installed here (loop/dsl_source.py) — checked against the declared
+reference source — and the student's policy carries the result. A declared list is
+used as written."""
 
 import os
 import sys
@@ -49,9 +49,8 @@ def _env(site: Path) -> dict:
     return env
 
 
-def _resolve(cfg, site, *, language="cutedsl", submit_env=None):
-    return ds.resolve(cfg, language=language, submit_env=submit_env or {},
-                      python=PY, probe_env=_env(site))
+def _resolve(cfg, site, *, language="cutedsl"):
+    return ds.resolve(cfg, language=language, python=PY, probe_env=_env(site))
 
 
 # -- resolution --------------------------------------------------------------------------
@@ -69,41 +68,21 @@ def test_a_declared_list_wins_as_written(tmp_path):
 def test_an_empty_key_defaults_to_the_installed_distribution(tmp_path):
     site = tmp_path / "site"
     pkgs = _fake_install(site, "4.6.0")
-    r = _resolve({"loop": {"dsl_source_dirs": []}}, site,
-                 submit_env={"DSL_PIN": "4.6.0"})
+    r = _resolve({"loop": {"dsl_source_dirs": []}}, site)
     assert r.defaulted and r.dirs == (pkgs.resolve(),) and r.version == "4.6.0"
     assert r.notes and r.notes[0].startswith("dsl_source_dirs: defaulted to ")
-    assert "nvidia-cutlass-dsl 4.6.0" in r.notes[0] and "matches [env] DSL_PIN" in r.notes[0]
+    assert "nvidia-cutlass-dsl 4.6.0" in r.notes[0]
     assert r.describe().startswith("default ")
-
-
-def test_no_pin_still_defaults_and_names_the_version(tmp_path):
-    site = tmp_path / "site"
-    pkgs = _fake_install(site, "4.6.2")
-    r = _resolve({"loop": {}}, site)
-    assert r.defaulted and r.dirs == (pkgs.resolve(),)
-    assert "4.6.2" in r.notes[0] and "DSL_PIN" not in r.notes[0]
-
-
-def test_a_pinned_version_that_differs_is_not_defaulted(tmp_path):
-    site = tmp_path / "site"
-    _fake_install(site, "4.6.2")
-    r = _resolve({"loop": {}}, site, submit_env={"DSL_PIN": "4.6.0"})
-    assert r.origin == ds.ORIGIN_NONE and r.dirs == () and r.version == "4.6.2"
-    assert "4.6.2 is installed" in r.notes[-1] and "DSL_PIN = 4.6.0" in r.notes[-1]
-    assert r.describe().startswith("(none — ")
 
 
 def test_an_install_overlapping_the_reference_source_is_refused(tmp_path):
     site = tmp_path / "site"
     pkgs = _fake_install(site, "4.6.0")
-    r = _resolve({"loop": {"ref_source_paths": [str(pkgs / "cutlass")]}}, site,
-                 submit_env={"DSL_PIN": "4.6.0"})
+    r = _resolve({"loop": {"ref_source_paths": [str(pkgs / "cutlass")]}}, site)
     assert r.origin == ds.ORIGIN_NONE and r.dirs == ()
     assert "overlaps the declared reference source" in r.notes[-1]
     # ... in either direction: a reference tree above the install is the same door.
-    r2 = _resolve({"loop": {"ref_source_paths": [str(site)]}}, site,
-                  submit_env={"DSL_PIN": "4.6.0"})
+    r2 = _resolve({"loop": {"ref_source_paths": [str(site)]}}, site)
     assert r2.origin == ds.ORIGIN_NONE
 
 
@@ -116,10 +95,8 @@ def test_nothing_installed_is_the_old_warning(tmp_path):
 
 
 def test_an_interpreter_that_cannot_run_is_reported_not_raised(tmp_path):
-    r = ds.resolve({"loop": {"dsl_python": str(tmp_path / "no-such-python")}},
-                   language="cutedsl", submit_env={})
+    r = ds.resolve({"loop": {}}, language="cutedsl", python=str(tmp_path / "no-such-python"))
     assert r.origin == ds.ORIGIN_NONE and "could not be located" in r.notes[-1]
-    assert "[loop] dsl_python" in r.notes[-1]
 
 
 def test_another_language_gets_no_dsl_default(tmp_path):
@@ -130,39 +107,13 @@ def test_another_language_gets_no_dsl_default(tmp_path):
     assert "language='cuda-cpp'" in r.notes[-1]
 
 
-def test_an_unreadable_card_env_refuses_to_default(tmp_path):
-    """The version gate is only as good as the pin it compares against: when the
-    caller could not read the card's [env] at all (a submit.toml that does not
-    parse, a card missing its submit.local.toml), an empty pin is not evidence that
-    the card pins nothing. Defaulting there hands the student another version's
-    source under a log line that says nothing is wrong."""
-    site = tmp_path / "site"
-    _fake_install(site, version="4.6.2")
-    # a readable card with no pin still defaults (nothing to contradict)
-    assert _resolve({"loop": {}}, site, submit_env={}).origin == ds.ORIGIN_DEFAULT
-    r = ds.resolve({"loop": {}}, language="cutedsl", submit_env={}, python=PY,
-                   probe_env=_env(site), pin_readable=False)
-    assert r.origin == ds.ORIGIN_NONE and r.dirs == ()
-    assert "could not be read" in r.notes[-1] and "DSL_PIN" in r.notes[-1]
-    # an explicit declaration still wins: the operator who named the tree is believed
-    mine = tmp_path / "my-dsl"
-    mine.mkdir()
-    r2 = ds.resolve({"loop": {"dsl_source_dirs": [str(mine)]}}, language="cutedsl",
-                    submit_env={}, python=PY, probe_env=_env(site), pin_readable=False)
-    assert r2.origin == ds.ORIGIN_EXPLICIT
-
-
 def test_an_install_without_dist_info_is_found_by_import(tmp_path):
     site = tmp_path / "site"
     pkgs = _fake_install(site, with_meta=False)
-    # No metadata → no version; without a pin that still defaults (import fallback),
-    # with a pin it cannot be checked and is refused.
-    r = ds.resolve({"loop": {}}, language="cutedsl", submit_env={}, python=PY,
+    # No metadata → no version; the import fallback still finds the package root.
+    r = ds.resolve({"loop": {}}, language="cutedsl", python=PY,
                    probe_env={**os.environ, "PYTHONPATH": str(pkgs)})
     assert r.defaulted and r.dirs == (pkgs.resolve(),) and r.version is None
-    r2 = ds.resolve({"loop": {}}, language="cutedsl", submit_env={"DSL_PIN": "4.6.0"},
-                    python=PY, probe_env={**os.environ, "PYTHONPATH": str(pkgs)})
-    assert r2.origin == ds.ORIGIN_NONE and "without a nvidia-cutlass-dsl version" in r2.notes[-1]
 
 
 # -- the policy carries it ---------------------------------------------------------------
@@ -171,7 +122,7 @@ def test_the_policy_and_notice_carry_the_default(tmp_path):
     site = tmp_path / "site"
     pkgs = _fake_install(site, "4.6.0")
     cfg = {"loop": {"dsl_source_dirs": [], "ref_source_paths": [], "ref_source_urls": []}}
-    r = _resolve(cfg, site, submit_env={"DSL_PIN": "4.6.0"})
+    r = _resolve(cfg, site)
     pol = ap.from_config(cfg, oracle_mode="blackbox", repo_root=tmp_path / "run",
                          teacher_trees=[], dsl_source_dirs_default=r.dirs)
     assert pol.dsl_source_dirs == (pkgs.resolve(),)
@@ -193,42 +144,16 @@ def test_a_declared_list_is_not_replaced_by_the_default(tmp_path):
 
 def test_declaration_warnings_defer_to_the_resolution(tmp_path):
     site = tmp_path / "site"
-    _fake_install(site, "4.6.2")
+    pkgs = _fake_install(site, "4.6.2")
     cfg = {"loop": {"dsl_source_dirs": []}}
     # Defaulted: no warning (the loop prints the default as news instead).
     ok = _resolve(cfg, site)
     assert ok.defaulted
     assert not [w for w in ap.declaration_warnings(cfg, ok) if "dsl_source_dirs" in w]
     # Refused: the refusal's own reason is the warning, not the bare "is empty".
-    bad = _resolve(cfg, site, submit_env={"DSL_PIN": "4.6.0"})
+    bad = _resolve({"loop": {"dsl_source_dirs": [],
+                             "ref_source_paths": [str(pkgs / "cutlass")]}}, site)
     ws = [w for w in ap.declaration_warnings(cfg, bad) if "dsl_source_dirs" in w]
-    assert len(ws) == 1 and "DSL_PIN = 4.6.0" in ws[0]
+    assert len(ws) == 1 and "overlaps the declared reference source" in ws[0]
     # Without a resolution the old warning stands.
     assert any("dsl_source_dirs is empty" in w for w in ap.declaration_warnings(cfg))
-
-
-def test_card_env_reads_the_toml_without_validating_the_whole_card(tmp_path):
-    """`forge <op> loop` reads the card's [env] straight from the TOML. Going
-    through submit.config.load_config validated the whole card, and its ValueError
-    (delivery=clone with no submit.local.toml, the normal state of a fresh run)
-    was swallowed — the pin compare then never happened and the loop defaulted to
-    whatever this machine had installed."""
-    from forgekernel.loop.cli import _card_env
-    root = tmp_path
-    op = root / "operators" / "demo"
-    op.mkdir(parents=True)
-    (op / "submit.toml").write_text(
-        '[job]\ntimeout = 60\n'
-        '[repo]\ndelivery = "ssh"\nbranch = "main"\n'
-        '[env]\nDSL_PIN = "4.6.0"\nOTHER = "1"\n')
-    # an ssh tree without [exec]: load_config raises, the TOML read not
-    assert _card_env("demo", root) == {"DSL_PIN": "4.6.0", "OTHER": "1"}
-    # a local file overrides, the way _merge does
-    (op / "submit.local.toml").write_text('[repo]\ngit_url = "https://example/x.git"\n'
-                                          '[env]\nDSL_PIN = "4.6.2"\n')
-    assert _card_env("demo", root) == {"DSL_PIN": "4.6.2", "OTHER": "1"}
-    # a card with no submit.toml at all, and one that does not parse: "unreadable",
-    # which is NOT the same as "no env" (the caller refuses to default on it)
-    assert _card_env("nope", root) is None
-    (op / "submit.toml").write_text("[job\nbroken")
-    assert _card_env("demo", root) is None

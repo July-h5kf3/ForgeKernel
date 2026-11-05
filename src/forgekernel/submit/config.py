@@ -19,7 +19,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from forgekernel.paths import operators_dir
+from forgekernel.paths import operators_dir, repo_root
 
 DELIVERIES = ("local", "ssh")
 
@@ -55,21 +55,16 @@ class SubmitConfig:
         return self.exec_host if self.delivery == "ssh" else "local"
 
 
-def _repo_root() -> Path:
-    # src/forgekernel/submit/config.py -> parents[3] == repo root
-    return Path(__file__).resolve().parents[3]
-
-
 def _ops_dir(base_dir: str | Path | None) -> Path:
     """``<base_dir>/operators`` when one is named, else the current run's operator trees
     (forgekernel.paths.operators_dir)."""
     if base_dir is not None:
         return Path(base_dir) / "operators"
-    return operators_dir(_repo_root())
+    return operators_dir(repo_root())
 
 
 def load_config(op: str, base_dir: str | Path | None = None) -> SubmitConfig:
-    base = Path(base_dir) if base_dir is not None else _repo_root()
+    base = Path(base_dir) if base_dir is not None else repo_root()
     op_dir = _ops_dir(base_dir) / op
     main = op_dir / "submit.toml"
     if not main.exists():

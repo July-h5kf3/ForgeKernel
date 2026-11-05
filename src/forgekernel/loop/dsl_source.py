@@ -7,16 +7,14 @@ by trial and error — in one GDN run a large share of the probe failures were s
 of the 4.6.0 API, not ideas being tested.
 
 This module derives a default for a ``cutedsl`` run from the ``nvidia-cutlass-dsl``
-distribution installed in a Python interpreter on this machine (the one running the
-loop, or ``[loop] dsl_python``): the wheel family puts the whole Python DSL under one
-directory (``nvidia_cutlass_dsl/dsl_packages/``, holding ``cutlass`` and its siblings;
-a ``.pth`` file adds it to ``sys.path``), and that directory is what the student needs.
+distribution installed in the interpreter running the loop: the wheel family puts the
+whole Python DSL under one directory (``nvidia_cutlass_dsl/dsl_packages/``, holding
+``cutlass`` and its siblings; a ``.pth`` file adds it to ``sys.path``), and that
+directory is what the student needs. (README: install ``nvidia-cutlass-dsl`` next to
+ForgeKernel so the student can read the API it writes against.)
 
-Three things keep the default honest:
+Two things keep the default honest:
 
-* **Version.** The job pins the DSL with ``[env] DSL_PIN`` (submit.toml); a local
-  install of another version is not the API the kernel is compiled against and must
-  not be handed over silently. Mismatch → no default, a warning that names both.
 * **Reference source.** A default that lies inside (or contains) a declared
   ``ref_source_paths`` entry would hand the student the reference through the DSL
   door. Overlap → no default, a note that says so.
@@ -30,12 +28,10 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 LANGUAGE_CUTEDSL = "cutedsl"
-KEY_DSL_PYTHON = "dsl_python"
-ENV_DSL_PIN = "DSL_PIN"
 DIST_SHELL = "nvidia-cutlass-dsl"
 DIST_CORE = "nvidia-cutlass-dsl-libs-core"   # the pure-Python DSL body
 PROBE_TIMEOUT_S = 60
@@ -106,7 +102,7 @@ class DslSource:
         return self.origin == ORIGIN_DEFAULT
 
     def describe(self) -> str:
-        """The dry-run line's value."""
+        """One line: the dirs and where they came from."""
         if self.origin == ORIGIN_EXPLICIT:
             return f"explicit {[str(p) for p in self.dirs]}"
         if self.origin == ORIGIN_DEFAULT:
@@ -146,36 +142,21 @@ def _overlaps(a: Path, b: Path) -> bool:
     return a == b or a in b.parents or b in a.parents
 
 
-def resolve(cfg: dict, *, language: str, submit_env: dict | None = None,
-            python: str | None = None, probe_env: dict | None = None,
-            pin_readable: bool = True) -> DslSource:
+def resolve(cfg: dict, *, language: str, python: str | None = None,
+            probe_env: dict | None = None) -> DslSource:
     """The run's ``dsl_source_dirs``: as declared, else derived, else none.
 
     ``cfg`` is the parsed loop.toml; ``language`` the resolved kernel language;
-    ``submit_env`` the card's ``[env]`` (for ``DSL_PIN``); ``python`` overrides the
-    interpreter (``[loop] dsl_python`` then ``sys.executable``).
-
-    ``pin_readable`` False means the caller could not read the card's submit config
-    at all, so ``submit_env`` is not evidence of "this card pins nothing": the
-    version gate would be off without saying so, and a default derived here would
-    hand the student whatever this machine happens to have installed. Refuse to
-    default instead — an unreadable card is a config problem the operator can see,
-    a silent version mismatch is not."""
+    ``python`` overrides the interpreter probed (``sys.executable`` by default)."""
     lc = cfg.get("loop", {}) if isinstance(cfg, dict) else {}
     declared = lc.get("dsl_source_dirs") or []
     if isinstance(declared, list) and declared:
         return DslSource(dirs=tuple(_abs(p) for p in declared), origin=ORIGIN_EXPLICIT)
     if language != LANGUAGE_CUTEDSL:
         return DslSource(notes=(f"language={language!r}: no DSL source to default",))
-    if not pin_readable:
-        return DslSource(notes=(
-            f"dsl_source_dirs is empty and the card's submit config could not be read "
-            f"(submit.toml / submit.local.toml under operators/) — its [env] {ENV_DSL_PIN} "
-            f"cannot be checked against the installed {DIST_SHELL}, so nothing is "
-            f"defaulted. Fix the card, or declare [loop] dsl_source_dirs explicitly",))
 
-    interp = python or lc.get(KEY_DSL_PYTHON) or sys.executable
-    interp_note = f"[loop] {KEY_DSL_PYTHON}" if lc.get(KEY_DSL_PYTHON) else "the loop's interpreter"
+    interp = python or sys.executable
+    interp_note = "the loop's interpreter"
     data = probe_interpreter(str(interp), env=probe_env)
     if data is None:
         return DslSource(notes=(
@@ -191,21 +172,6 @@ def resolve(cfg: dict, *, language: str, submit_env: dict | None = None,
             f"{interp_note} ({interp}) — the student is offline, so it can read the "
             f"DSL's API only from a local checkout named in [loop] dsl_source_dirs",))
 
-    pin = (submit_env or {}).get(ENV_DSL_PIN)
-    pin = str(pin).strip() if pin is not None else ""
-    if pin and version and pin != version:
-        return DslSource(version=version, notes=(
-            f"dsl_source_dirs is empty; {DIST_SHELL} {version} is installed in "
-            f"{interp_note} but the job pins [env] {ENV_DSL_PIN} = {pin} — not defaulting "
-            f"to another version's source. Install {pin} there, point [loop] "
-            f"{KEY_DSL_PYTHON} at an interpreter that has it, or declare [loop] "
-            f"dsl_source_dirs explicitly",))
-    if pin and not version:
-        return DslSource(notes=(
-            f"dsl_source_dirs is empty; a DSL package was found in {interp_note} but "
-            f"without a {DIST_SHELL} version to check against [env] {ENV_DSL_PIN} = {pin} "
-            f"— declare [loop] dsl_source_dirs explicitly",))
-
     refs = [_abs(p) for p in (lc.get("ref_source_paths") or [])
             if isinstance(p, str)]
     clash = [(r, ref) for r in roots for ref in refs if _overlaps(r, ref)]
@@ -219,5 +185,4 @@ def resolve(cfg: dict, *, language: str, submit_env: dict | None = None,
     return DslSource(
         dirs=tuple(roots), origin=ORIGIN_DEFAULT, version=version,
         notes=(f"dsl_source_dirs: defaulted to {[str(r) for r in roots]} "
-               f"({DIST_SHELL} {version or 'unversioned'}, {interp_note}"
-               + (f", matches [env] {ENV_DSL_PIN}" if pin else "") + ")",))
+               f"({DIST_SHELL} {version or 'unversioned'}, {interp_note})",))

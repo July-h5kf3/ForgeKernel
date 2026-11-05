@@ -1,14 +1,14 @@
-"""``forge loop <op>`` — run the two-layer loop unattended.
+"""``forge <op> loop`` — run the two-layer loop unattended on a generated card.
 
 Wires the deterministic driver core (``forgekernel.loop.driver``) to real
 adapters: an agent CLI (for student/meta turns), the GPU harness
 (``forgekernel.submit``), and git (workspace commit/push/reset). The core loop is
 unit-tested with a fake backend; this module is the side-effecting boundary.
 
-A real run needs ``--agent-cmd`` (a headless agent that reads a prompt on stdin
-and prints its final message to stdout) and a GPU machine in the operator tree's
-submit.toml. ``--dry-run`` validates config and prints the plan without spawning agents
-or GPU jobs.
+``forge run`` (``forgekernel.launch``) is the only caller: it generates the card and
+its loop.toml from the task and passes the budget, the target and the two agent
+commands. Everything else the loop needs is read from the card (loop.toml,
+problem.json); the knobs that used to be arguments are the constants below.
 """
 
 from __future__ import annotations
@@ -31,7 +31,6 @@ from pathlib import Path
 from forgekernel.baseline import (
     ARCH_BASELINE_FILENAME,
     BASELINE_FILENAME,
-    HOST_FREE_BASES,
     ROLE_ARCHITECTURE,
     ROLE_LIBRARY,
     RefBaseline,
@@ -41,15 +40,12 @@ from forgekernel.baseline import (
     workloads_mismatch,
 )
 from forgekernel.inner.trajectory import GATE_WINDOW_DEFAULT, GATE_WINDOWS
-from forgekernel.loop.agentctx import inspect_agent_cmd
 from forgekernel.loop import agent_policy as agent_policy_mod
 from forgekernel.loop import dsl_source as dsl_source_mod
 from forgekernel.loop import goal_ref as goal_ref_mod
 from forgekernel.loop import harness_guard, precision_gate
 from forgekernel.loop.agent_policy import AgentPolicy
-from forgekernel.loop.agentctx import window_findings as context_window_findings
 from forgekernel.loop.driver import (
-    ENTRY_DONE_RE,
     EVIDENCE_FILE_NAMES,
     JOB_ENV_PREFLIGHT_POLICIES,
     _RECON_STATE_NAME,
@@ -66,6 +62,7 @@ from forgekernel.loop.driver import (
     archive_is_whole,
 )
 from forgekernel.loop.harvest import format_report, git_status, kb_blockers
+from forgekernel.loop.parse import ENTRY_DONE_RE
 from forgekernel import monitor as monitor_mod
 from forgekernel.window_contract import (
     EXIT_WINDOW_UNDECLARED,
@@ -80,7 +77,7 @@ from forgekernel.window_contract import (
 )
 from forgekernel.loop.kb_lint import derive_reference_tokens, lint_kb_dir
 from forgekernel.loop import lang_mode
-from forgekernel.paths import operators_dir
+from forgekernel.paths import operators_dir, repo_root
 from forgekernel.submit.jobs import (STATUS_LOST, STATUS_RUNNING,
                                      STATUS_SUCCEEDED, TRANSPORT_ERROR_MARKER,
                                      clock_lock_refusal, is_job, job_log, job_status)
@@ -88,6 +85,26 @@ from forgekernel.submit.jobs import (STATUS_LOST, STATUS_RUNNING,
 # The run's outcome as the loop ends it (``stop``: target, meta_budget, infeasible, ...),
 # beside the operator tree; `forge run` reads it for its exit code.
 SUMMARY_FILE = "loop_summary.json"
+
+# -- the loop's fixed settings ---------------------------------------------------------------
+# What used to be `forge <op> loop` arguments and loop.toml knobs (docs/design/v1-launch.md
+# §12, Appendix A): set to the values the runs that worked well used, not configurable.
+GIT_NAME = "forge-loop"
+GIT_EMAIL = "forge-loop@local"
+REF_REPEAT = 3                   # reference measurements; the fastest is kept
+AGENT_HEARTBEAT_S = 600.0        # a progress line while a turn runs (0 = none)
+KB_TRIPWIRE_ROUNDS = 6           # a student probe this many GPU rounds deep earns a KB write-up
+CONFIRM_JOBS = 3                 # the finish re-measures the best sha this many times
+MAX_PROBE_ROUNDS = 4             # GPU layout-probe rounds per student iteration
+MAX_VERDICT_PROBE_ROUNDS = 4     # GPU verdict-experiment rounds per diagnose step
+INFEASIBLE_MIN_DIAGNOSES = 1     # plateau diagnoses before an INFEASIBLE stop can be accepted
+LEVER_PRICING_ROUNDS = 3         # interleaved timing rounds per variant in a pricing job
+LEVER_PRICING_MAX_LEVERS = 5
+MAX_CONSECUTIVE_REVERTS = 3      # before the inner loop yields to the teacher (stuck)
+REOPEN_MAX_FRUITLESS = 2         # fruitless reopen transactions before reopening closes
+REPRICE_MIN_GAIN_PCT = 3.0       # a new best this much faster re-prices the cited levers
+WATERMARK_MARGIN = 0.03          # a new best beyond this fraction is re-measured first
+REANCHOR_BAND = 0.06             # a gap residual inside this band re-anchors the ref first
 
 # Statuses a job can still move on from. Everything else is terminal.
 _NON_TERMINAL = {STATUS_RUNNING}
@@ -147,45 +164,6 @@ def _end_process_group(proc: subprocess.Popen, grace_s: float = 8.0) -> None:
         proc.kill()
 
 
-
-# A /goal session is served by scripts/claude-goal.py; scripts/agent-claude.sh hands a
-# turn to it when the caller sets FK_AGENT_DRIVER=goal.
-_GOAL_DRIVER_MARK = "claude-goal"
-
-
-def goal_leg_findings(cmds: list[str | None], env: dict[str, str],
-                      cwd: str | os.PathLike | None = None) -> list[str]:
-    """Why these agent commands would serve a /goal session as `claude -p` instead.
-
-    A caller asks for a goal session with FK_AGENT_DRIVER=goal; it is one only when the
-    command, or a script it names, reaches scripts/claude-goal.py. Static, one level
-    deep, like the policy's command_findings: a script that builds its command at
-    runtime is not seen."""
-    from forgekernel.loop.agentctx import _SCRIPT_TOKEN, _expand
-
-    def scripts_in(text: str) -> list[str]:
-        out = []
-        for m in _SCRIPT_TOKEN.finditer(text):
-            path = _expand(m.group(1), {}, env)
-            if not os.path.isabs(path) and cwd is not None:
-                path = os.path.join(os.fspath(cwd), path)
-            if os.path.isfile(path):
-                try:
-                    out.append(Path(path).read_text(encoding="utf-8", errors="replace"))
-                except OSError:
-                    pass
-        return out
-
-    findings = []
-    for cmd in cmds:
-        if not cmd:
-            continue
-        if any(_GOAL_DRIVER_MARK in body for body in [cmd, *scripts_in(cmd)]):
-            continue
-        findings.append("agent command: does not run scripts/agent-claude.sh or "
-                        "scripts/claude-goal.py, so it runs as written (claude -p)")
-    return list(dict.fromkeys(findings))
-
 # Server-side API trouble the agent CLI surfaces as a non-zero exit: overload (529),
 # rate limits (429), 5xx, and connection-level drops. These clear on their own — the
 # only wrong response is giving up inside the outage window, which is exactly what
@@ -233,16 +211,11 @@ def poll_until_terminal(status_fn, job, *, poll_s, timeout_s, now, sleep):
         sleep(poll_s)
 
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
-
-
-
 def _forge(op: str, *args: str, timeout: float = 600.0,
            env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, "-m", "forgekernel", op, *args],
-        capture_output=True, text=True, cwd=_repo_root(), timeout=timeout,
+        [sys.executable, "-m", "forgekernel.submit", op, *args],
+        capture_output=True, text=True, cwd=repo_root(), timeout=timeout,
         env=None if env is None else {**os.environ, **env},
     )
 
@@ -1113,19 +1086,6 @@ def resolve_job_env_files(cfg: dict, op_dir: Path, *, kernel_file: str = "") -> 
     return out
 
 
-def _reuse_mode(value) -> str:
-    """[loop] reuse_unchanged_reading: "all" | "gate" | "off" (true / false read as
-    "all" / "off"). Anything else is a config error, refused at launch rather than
-    silently re-measuring (or silently not)."""
-    if isinstance(value, bool):
-        return "all" if value else "off"
-    mode = str(value).strip().lower()
-    if mode not in ("all", "gate", "off"):
-        raise SystemExit(f"[loop] reuse_unchanged_reading must be \"all\", \"gate\" or "
-                         f"\"off\", got {value!r}")
-    return mode
-
-
 def _resolve_ref_in_job(cfg: dict, spec: dict) -> bool:
     """[loop] ref_in_job — the bench's in-job comparator is the reference itself.
 
@@ -1151,15 +1111,7 @@ def _resolve_ref_in_job(cfg: dict, spec: dict) -> bool:
 
 ORACLE_SOURCE = "source"
 ORACLE_BLACKBOX = "blackbox"
-ORACLE_NONE = "none"
-ORACLE_MODES = (ORACLE_SOURCE, ORACLE_BLACKBOX, ORACLE_NONE)
-
-# How the dry-run plan describes a run with no oracle path, per mode. Absence means
-# different things in each: deliberately withheld, or nothing to withhold.
-_ORACLE_PLAN = {
-    ORACLE_BLACKBOX: "(withheld — distilling from black-box reconnaissance)",
-    ORACLE_NONE: "(none — not distilling; student runs the milestone on disk)",
-}
+ORACLE_MODES = (ORACLE_SOURCE, ORACLE_BLACKBOX)
 
 
 def _will_distill(milestone: Path, oracle: str | None, mode: str = ORACLE_SOURCE) -> bool:
@@ -1209,8 +1161,8 @@ def _harvest_only(ctx, args, root: Path, milestone: Path, oracle, cfg: dict | No
     pays its kb-tripwire / axis bill: the KEEPs that moved a SASS contract axis
     stay "queued for the end-of-run KB harvest write-up" forever. This builds the
     same context a launch would (agent policy, teacher channel, KB tree, lint
-    tokens) through the dry-run path, then runs only run_kb_harvest — one
-    teacher turn, zero GPU jobs, no confirmation: what the teacher
+    tokens) without measuring or refusing anything, then runs only run_kb_harvest —
+    one teacher turn, zero GPU jobs, no confirmation: what the teacher
     wrote is left uncommitted for a human to review, as at the end of every run."""
     if not (args.teacher_agent_cmd or args.agent_cmd):
         sys.stderr.write("[loop] error: --harvest-only needs a teacher: --teacher-agent-cmd / "
@@ -1544,8 +1496,8 @@ def _ensure_ref_baseline(op: str, op_dir: Path, milestone: Path, oracle: str | N
     Returns None when the loop does not need a baseline (nothing to distill) or
     cannot produce one (no ref_cmd declared) — the driver reports the latter.
 
-    ``measure=False`` reports what a real run would do without doing it: --dry-run
-    exists to validate config, and a plan that submits GPU jobs is not a plan.
+    ``measure=False`` reports what a real run would do without doing it (the
+    --harvest-only path builds its context without buying a job).
 
     When the declared reference is the architecture reference itself (a task's one
     reference is both) and ``arch`` was measured, its reading is archived again
@@ -1718,25 +1670,6 @@ def _window_preflight(op_dir: Path, cfg: dict, *, resuming: bool
     return "ok", contract, window_warnings(contract)
 
 
-def _window_dry_run_line(state: str, contract: WindowContract | None,
-                         problems: list[str], allowed: bool) -> str:
-    if state == "n/a":
-        return "n/a (no reference declared — no second window to compare against)"
-    if state == "ok":
-        n = len(contract.asymmetries) if contract else 0
-        priced = len(contract.priced_entries) if contract else 0
-        prep = len(contract.prep_entries) if contract else 0
-        return (f"declared ({n} asymmetr{'y' if n == 1 else 'ies'}, {priced} priced"
-                + (f", {prep} prep-produced" if prep else "") + ")"
-                + (f"; {len(problems)} note(s)" if problems else ""))
-    if state == "warn":
-        return f"UNDECLARED — resuming, so a real run only warns ({len(problems)} finding(s))"
-    if allowed:
-        return f"UNDECLARED — admitted by --allow-undeclared-window ({len(problems)} finding(s))"
-    return (f"UNDECLARED — {len(problems)} finding(s), a real run would refuse to start "
-            f"without --allow-undeclared-window")
-
-
 def _teacher_only_trees(cfg: dict, root: Path, op: str, oracle_mode: str,
                         oracle_paths: list[str] | None = None, *,
                         goal_ref: bool = True) -> list[Path]:
@@ -1820,20 +1753,10 @@ def _load_loop_config(op_dir: Path) -> dict:
 
 
 def _has_distillation_input(oracle: str | None, mode: str) -> bool:
-    """Whether the teacher has anything to distill a milestone *from*.
-
-    Distillation needs an input; source code is one kind of input and black-box
-    reconnaissance of the reference is another. Before this distinction existed the
-    only question asked was "is there an oracle path", so the two ways of having no
-    path — "the teacher is forbidden to read source" and "there is nothing to distill
-    at all" — collapsed into one. --no-oracle therefore did not mean "distill without
-    source": it silently skipped distillation *and* the baseline measurement that
-    gates it, and the loop started against whatever milestone already existed.
-    """
+    """Whether the teacher has anything to distill a milestone *from*: the reference's
+    source (source mode), or black-box reconnaissance of it (blackbox mode)."""
     if mode == ORACLE_BLACKBOX:
         return True
-    if mode == ORACLE_NONE:
-        return False
     return bool(oracle)
 
 
@@ -1846,25 +1769,6 @@ def _milestone_valid(milestone: Path) -> bool:
         return False
 
 
-def _goal_ref_agent_problem(args) -> str | None:
-    """Why no agent command here can serve the reference session as a /goal session
-    (None when one can). It runs on the teacher's command (the student's when there is
-    no teacher command), under the student's rules; a command that never reaches
-    scripts/claude-goal.py would serve it as one `claude -p` turn, which is not the session the
-    budget, the deadline and the deliverable check are built for."""
-    cmd = getattr(args, "teacher_agent_cmd", None) or args.agent_cmd
-    if not cmd:
-        return "no --agent-cmd / --teacher-agent-cmd to run the /goal session with"
-    try:
-        found = goal_leg_findings([cmd], dict(os.environ), cwd=os.getcwd())
-    except Exception as e:  # noqa: BLE001
-        return f"could not inspect the agent command ({e})"
-    if found:
-        return ("the reference session needs a goal-capable agent command "
-                "(scripts/agent-claude.sh): " + "; ".join(found))
-    return None
-
-
 def goal_ref_backend(op: str, cfg: dict, git_name: str, git_email: str):
     """The ref_from_goal session's job channel: the submission tree's own backend."""
     def make(tree_op: str, tree: Path):
@@ -1872,21 +1776,8 @@ def goal_ref_backend(op: str, cfg: dict, git_name: str, git_email: str):
     return make
 
 
-def _resolve_oracle_mode(no_oracle: bool, mode_flag: str | None, cfg: dict) -> str:
-    """Which channel the teacher distills through: --oracle-mode, else loop.toml, else source.
-
-    --no-oracle is kept as the spelling of ORACLE_NONE it always was.
-    """
-    if mode_flag:
-        if mode_flag not in ORACLE_MODES:
-            raise SystemExit(f"--oracle-mode must be one of {ORACLE_MODES}, got {mode_flag!r}")
-        if no_oracle and mode_flag != ORACLE_NONE:
-            raise SystemExit(
-                f"--no-oracle contradicts --oracle-mode {mode_flag}; --no-oracle is "
-                f"--oracle-mode {ORACLE_NONE}")
-        return mode_flag
-    if no_oracle:
-        return ORACLE_NONE
+def _resolve_oracle_mode(cfg: dict) -> str:
+    """Which channel the teacher distills through: loop.toml [loop] oracle_mode, else source."""
     configured = cfg.get("loop", {}).get("oracle_mode")
     if configured:
         if configured not in ORACLE_MODES:
@@ -1934,7 +1825,7 @@ def _resolve_oracle(mode: str, oracle_flag: str | None, cfg: dict) -> str | None
 
     Only ORACLE_SOURCE resolves a path. ORACLE_BLACKBOX withholds it deliberately —
     the point of that mode is that the reference is a binary you can run and profile
-    but not read — and ORACLE_NONE has nothing to withhold.
+    but not read.
 
     Accepts several paths, because one file is often not the whole reference. One
     operator's pointed at flash_bwd_sm90.py — a parameterised kernel whose tile
@@ -1971,14 +1862,10 @@ def _oracle_paths(mode: str, oracle_flag: str | None, cfg: dict) -> list[str]:
 def _student_denied_oracle(mode: str, oracle_flag: str | None, cfg: dict,
                            declared: list[str]) -> list[str]:
     """The oracle paths denied to the student: this run's oracle AND the one declared
-    at launch. ref_from_goal replaces the declared oracle as the run's input ("always",
-    or a reuse) — it drops out of ``cfg`` and ``--oracle`` — but it is still a reference
-    the student must not read."""
+    at launch. A reused ref_from_goal reference replaces the declared oracle as the
+    run's input — it drops out of ``cfg`` — but it is still a reference the student
+    must not read."""
     return list(dict.fromkeys([*_oracle_paths(mode, oracle_flag, cfg), *declared]))
-
-
-# valid kernel implementation languages (governs the student prompt + harness).
-LANGUAGES = ("cuda-cpp", "inline-ptx", "triton", "cutlass-cpp", "cutedsl", "cuda-sol")
 
 
 def _card_kernel_file(op_dir: Path) -> str:
@@ -2007,39 +1894,11 @@ def _resolve_language(language_flag: str | None, cfg: dict,
             or lang_mode.language_for_kernel_file(kernel_file) or "cutedsl")
 
 
-def _card_env(op: str, root: Path) -> "dict | None":
-    """The card's ``[env]`` (submit.toml + submit.local.toml), read straight from
-    the TOML, or None when the card's submit config cannot be read at all.
-
-    Deliberately NOT ``submit.config.load_config``: that validates the whole card
-    (an unknown ``[repo] delivery`` or an ssh tree without ``[exec]`` raises
-    ValueError, a missing ``[repo] branch`` raises KeyError), and swallowing
-    those turned the DSL_PIN version gate off for any unrelated config problem —
-    the loop then defaulted the student's DSL source to whatever this machine has
-    installed and reported it as a match. The DSL default needs the ``[env]``
-    table and nothing else; a card whose TOML is unreadable gets no default.
-
-    None (unreadable) is distinct from ``{}`` (readable, no ``[env]``): the caller
-    refuses to default in the first case and treats the second as "no pin"."""
-    out: dict = {}
-    found = False
-    for name in ("submit.toml", "submit.local.toml"):
-        path = operators_dir(root) / op / name
-        if not path.is_file():
-            continue
-        try:
-            with open(path, "rb") as fh:
-                data = tomllib.load(fh)
-        except (OSError, tomllib.TOMLDecodeError):
-            return None
-        found = True
-        out.update({str(k): str(v) for k, v in (data.get("env") or {}).items()})
-    return out if found else None
-
-
 KB_ARCH_DEFAULT = "sm90"
 # Every code through 13 already names another refusal (4-8 preflight, 9 fresh-start
-# contamination, 10 and 12 retired, 11 200k window, 13 window undeclared); tests/test_kb_arch.py reads the literal return sites to keep this unique.
+# contamination, 10 workspace without a remote, 11 and 12 retired, 13 window undeclared);
+# tests/test_kb_arch.py reads the literal return sites to keep this unique.
+EXIT_NO_REMOTE = 10
 EXIT_KB_ARCH_MISSING = 14
 # 15: the run's reference is not declared for the agent policy (loop/agent_policy.py) —
 # a blackbox run with no [loop] ref_source_paths / ref_source_urls would deny nothing.
@@ -2172,235 +2031,85 @@ def _resolve_ref_pricing(cfg: dict, root, recon_dir, recon_backend, make_backend
 def _main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="forge <op> loop",
-        description="Run the two-layer loop unattended.",
+        description="Run the two-layer loop unattended on a card `forge run` generated.",
     )
     p.add_argument("op")
     p.add_argument("--workspace", required=True,
-                   help="L0-isolated student workspace (single-branch clone)")
-    p.add_argument("--milestone", help="path to the student-facing milestone.md")
-    p.add_argument("--kernel-file", default=None,
-                   help="the student's kernel file (default: a leaderboard card's problem.json "
-                        "kernel_file, else kernel.py)")
-    p.add_argument("--oracle", default=None,
-                   help="teacher-only oracle path (overrides the loop.toml default)")
-    p.add_argument("--no-oracle", action="store_true",
-                   help=f"alias for --oracle-mode {ORACLE_NONE}: do not distill at all "
-                        "(run the student against an already-written milestone)")
-    p.add_argument("--oracle-mode", default=None, choices=[None, *ORACLE_MODES],
-                   help="how the teacher distills: 'source' reads the oracle (default); "
-                        "'blackbox' withholds the source and distills from black-box "
-                        "reconnaissance of the reference instead; 'none' does not distill. "
-                        "Default: loop.toml [loop].oracle_mode, else source")
-    p.add_argument("--ref-from-goal", default=None, choices=[None, *goal_ref_mod.MODES],
-                   help="no reference to distil from: first generate one with a /goal "
-                        "session on the card's own harness and use it as the oracle "
-                        "(loop/goal_ref.py). 'auto' = when a source-mode run has no oracle and "
-                        "no milestone; 'always' = on every source-mode run; 'off' = never. "
-                        "Default: loop.toml [loop].ref_from_goal, else auto")
-    p.add_argument("--ref-from-goal-hours", type=float, default=None,
-                   help="wall-clock budget of that session (default: [loop] "
-                        f"ref_from_goal_hours, else {goal_ref_mod.DEFAULT_HOURS:g}); not "
-                        "counted in --hours")
-    p.add_argument("--language", default=None, choices=[None, *LANGUAGES],
-                   help="kernel implementation language (default: loop.toml [loop].language or cutedsl)")
-    p.add_argument("--kb-arch", default=None,
-                   help="which hw_kb/<language>/<arch>/ tree the run reads and files recipes into "
-                        "(default: loop.toml [loop].kb_arch, else sm90)")
+                   help="the student's workspace (a single-branch clone of the card)")
     p.add_argument("--hours", type=float, default=4.0, help="inner-loop wall-clock budget")
     p.add_argument("--target-ms", type=float, default=None,
-                   help="stop threshold; default: derived from the archived ref "
-                        "baseline via --equivalence-ratio")
-    p.add_argument("--ref-repeat", type=int, default=3,
-                   help="when measuring the ref baseline, how many runs to take the "
-                        "fastest of (default 3)")
+                   help="stop threshold; default: derived from the measured reference "
+                        "via --equivalence-ratio")
     p.add_argument("--equivalence-ratio", type=float, default=1.0,
                    help="reproduce the ref to within this throughput ratio (default 1.0: "
                         "match the reference outright; above 1 = beat it, e.g. 1.05 = 5%% "
                         "more throughput; the stop target is ref_ms / ratio either way)")
-    p.add_argument("--gate-window", default=None, choices=[None, *GATE_WINDOWS],
-                   help="timing window every verdict (best / target stop / plateau) "
-                        "reads: 'device' = pipelined batch ≈ device time (the "
-                        "kernel-quality claim), 'e2e' = per-call+sync incl. host tax. "
-                        "target_ms is derived from the ref's reading in this same "
-                        "window. Default: loop.toml [loop].gate_window, else device")
-    p.add_argument("--allow-host-bound-ref", action="store_true",
-                   help="derive target from a reference whose device window is HOST-BOUND "
-                        "(its reading is python dispatch cost, so the target is loose by "
-                        "whatever the wrapper costs). Escape hatch only — the correct fix "
-                        "is to re-measure the reference through a host-free window")
-    p.add_argument("--branch-prefix", default=None)
     p.add_argument("--agent-cmd", default=None,
                    help="headless agent: reads prompt on stdin, prints final message to stdout")
-    p.add_argument("--allow-200k-window", action="store_true",
-                   help="start even though --agent-cmd names a bare claude model id behind "
-                        "a gateway (ANTHROPIC_BASE_URL): the claude CLI then budgets the "
-                        "session at 200k and auto-compacts it at ~150-170k tokens. The fix "
-                        "is '<model>[1m]' or CLAUDE_CODE_AUTO_COMPACT_WINDOW; this flag "
-                        "declares that the clamp is intended")
-
     p.add_argument("--teacher-agent-cmd", default=None,
                    help="agent command for the TEACHER turns (recon, distill, diagnose/"
                         "patch, KB certify/harvest, lever design); the student keeps "
                         "--agent-cmd. Default: --agent-cmd serves both roles")
-    p.add_argument("--agent-heartbeat-s", type=float, default=600.0,
-                   help="while an agent turn runs, print a progress line every N seconds "
-                        "(a watchdog may read run-log silence as a stall; default 600, "
-                        "0 disables)")
     p.add_argument("--max-meta", type=int, default=3)
-    p.add_argument("--kb-tripwire-rounds", type=int, default=6,
-                   help="a student probe that needs >= this many GPU rounds before its "
-                        "PASS gets an end-of-run KB write-up turn (0 disables); the "
-                        "winning probe's own PASS is the certification evidence, so "
-                        "this costs one agent turn and no GPU")
-    p.add_argument("--confirm-jobs", type=int, default=None,
-                   help="after the loop stops, re-measure the best sha this many times "
-                        "and report the median same-job ratio (single jobs cannot "
-                        "separate a real win from node luck). Default: loop.toml "
-                        "[loop].confirm_jobs, else 3; 0 disables")
-    p.add_argument("--max-probe-rounds", type=int, default=4,
-                   help="GPU layout-probe rounds before an iteration is recorded as blocked")
-    p.add_argument("--max-verdict-probe-rounds", type=int, default=4,
-                   help="GPU verdict-experiment rounds per diagnose step (0 disables): "
-                        "the meta agent may falsify a hypothesis with one job instead "
-                        "of betting a whole inner segment on it")
-    p.add_argument("--min-meta-before-infeasible", type=int, default=None,
-                   help="fewest plateau diagnoses (this one included) before a teacher's "
-                        "INFEASIBLE stop request can be accepted; the reachability check "
-                        "(BLOCKED, floor_opt > target x 1.20) applies regardless. Default: "
-                        "loop.toml [loop].infeasible_min_diagnoses, else 1")
-    p.add_argument("--lever-pricing-rounds", type=int, default=None,
-                   help="plateau diagnosis and M0 audit: design-turn + one GPU job that prices the "
-                        "teacher's candidate levers (single-add / single-remove / all-on) "
-                        "before a cause_class is asked for. The value is how many interleaved "
-                        "bench rounds the job times each variant; 0 disables the round. "
-                        "Default: loop.toml [loop] lever_pricing_rounds, else 3.")
-    p.add_argument("--no-m0-audit", action="store_true",
-                   help="disable the forced meta audit at each segment's first green "
-                        "(M0 close); on by default — the gate verifies the student "
-                        "against the milestone, the audit verifies the milestone "
-                        "against the hardware")
-    p.add_argument("--max-consecutive-reverts", type=int, default=3,
-                   help="consecutive REVERTs before the inner loop yields to meta (stuck)")
-    p.add_argument("--git-name", default="forge-loop")
-    p.add_argument("--git-email", default="forge-loop@local")
     p.add_argument("--allow-preexisting-artifacts", action="store_true",
                    help="start a fresh run (empty status.jsonl) even though phase "
                         "products — milestone.md, recon findings, recon_complete.json, "
                         "archived baselines, meta history — already exist on disk "
                         "(default: refuse, so a new run cannot silently inherit a "
-                        "previous run's products; pass this to declare the reuse, "
-                        "e.g. a fix-rerun holding reconnaissance constant)")
+                        "previous run's products; `forge run` passes this on a resume)")
     p.add_argument("--allow-dirty-kb", action="store_true",
                    help="start even if hw_kb has uncommitted changes (default: refuse, so a "
                         "certified recipe from an earlier run is not buried under a new one)")
-    p.add_argument("--skip-kb-lint", action="store_true",
-                   help="start even if the KB leak lint finds reference-implementation "
-                        "provenance inside hw_kb entries (default: refuse; the fix is to "
-                        "move that content to docs/kb-provenance/, see its README)")
-    p.add_argument("--allow-undeclared-window", action="store_true",
-                   help="start even though operators/<op>/window.toml is absent or "
-                        "inconsistent (default: refuse on a fresh start of a run that "
-                        "has a reference — the reference's and the student's timed "
-                        "calls must be declared to have the same boundary, or every "
-                        "difference classed symmetrize / price / accept; otherwise the "
-                        "ratio carries an unaccounted contract tax nobody can diagnose)")
-    p.add_argument("--allow-single-workload", action="store_true",
-                   help="start even though operators/<op>/eval/bench.py does not time "
-                        "several workloads of the card's shape through "
-                        "timing.measure_windows_workloads (default: refuse on a fresh "
-                        "start — a kernel judged on one input set is tuned to that input "
-                        "set; resuming runs only warn)")
-    p.add_argument("--dry-run", action="store_true")
     p.add_argument("--harvest-only", action="store_true",
                    help="run only the end-of-run KB write-up (kb-tripwire + axis bill) on "
                         "the existing trajectory — for a run stopped before its finish "
-                        "path. The launch path runs as a dry run (no measurement, no GPU "
-                        "job, no loop); one teacher turn; nothing is published")
+                        "path. No measurement, no GPU job, no loop; one teacher turn; "
+                        "nothing is published")
     args = p.parse_args(argv)
-    if args.harvest_only:
-        # everything up to the context is the dry-run path: archived baselines only,
-        # no refusal gates, no job
-        args.dry_run = True
+    # --harvest-only builds the loop's context from what is archived and refuses nothing:
+    # a write-up of a stopped run must not re-measure or re-gate it.
+    plan_only = bool(args.harvest_only)
+    agent_cmds = [c for c in (args.agent_cmd, args.teacher_agent_cmd) if c]
 
-    # Context-window gate: a bare claude id behind a gateway runs on a 200k budget
-    # and gets auto-compacted mid-turn (agentctx). This needs only the command
-    # text / env / config dirs — nothing measured — so it runs first, before any
-    # GPU baseline, and a refusal costs nothing.
-    # Every headless leg goes through the gate: the student (--agent-cmd) and,
-    # on branches that carry it, the teacher (--teacher-agent-cmd). The attribute
-    # only exists once that flag is registered, so read it defensively rather
-    # than asserting either way — this code must run unchanged on both sides of
-    # the merge.
-    window_problems = []
-    window_cmds = [args.agent_cmd]
-    teacher_cmd = getattr(args, "teacher_agent_cmd", None)
-    if teacher_cmd and teacher_cmd not in window_cmds:
-        window_cmds.append(teacher_cmd)
-    if not args.allow_200k_window:
-        # The agent inherits the launcher's environment, which unsets every
-        # ANTHROPIC_* variable (the run scripts do `unset ANTHROPIC_* ...` so the
-        # interactive session's project env / model selection never reach the
-        # agent). Reproduce that before reading the command, otherwise the gate
-        # would see this shell's ANTHROPIC_MODEL / ANTHROPIC_BASE_URL as legs.
-        agent_env = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
-        for cmd in window_cmds:
-            window_problems.extend(context_window_findings(inspect_agent_cmd(cmd, agent_env,
-                                                                     args.workspace)))
-    if window_problems and not args.dry_run:
-        sys.stderr.write(
-            f"[loop] error: --agent-cmd would run the agent on a 200k context budget "
-            f"({len(window_problems)} finding(s)):\n")
-        for f in window_problems:
-            sys.stderr.write(f"[loop]   {f}\n")
-        sys.stderr.write(
-            "[loop] add the '[1m]' suffix to the model id (or CLAUDE_CODE_AUTO_COMPACT_WINDOW "
-            "to that leg's env), or pass --allow-200k-window to declare the clamp intended.\n")
-        return 11
-
-    root = _repo_root()
+    root = repo_root()
     op_dir = operators_dir(root) / args.op
-    if args.kernel_file is None:
-        args.kernel_file = _card_kernel_file(op_dir)
+    kernel_file = _card_kernel_file(op_dir)
     cfg = _load_loop_config(op_dir)
     workspace = Path(args.workspace).resolve()
-    milestone = Path(args.milestone) if args.milestone else op_dir / "milestone.md"
+    milestone = op_dir / "milestone.md"
     status_path = op_dir / "student" / "status.jsonl"
     status_path.parent.mkdir(parents=True, exist_ok=True)
     status_path.touch(exist_ok=True)
     meta_status_path = op_dir / "meta_status.jsonl"
     meta_status_path.touch(exist_ok=True)
-    branch_prefix = args.branch_prefix or f"forge-student-{args.op}"
-    oracle_mode = _resolve_oracle_mode(args.no_oracle, args.oracle_mode, cfg)
-    oracle = _resolve_oracle(oracle_mode, args.oracle, cfg)
+    branch_prefix = f"forge-student-{args.op}"
+    oracle_mode = _resolve_oracle_mode(cfg)
+    oracle = _resolve_oracle(oracle_mode, None, cfg)
     # No reference to distil from (loop/goal_ref.py): a reference this op dir already
     # generated is wired in as the oracle right here, before anything reads one; a
     # generation still to run (or to resume) runs after the fresh-start gate below.
-    declared_oracle = _oracle_paths(oracle_mode, args.oracle, cfg)
+    declared_oracle = _oracle_paths(oracle_mode, None, cfg)
     try:
-        goal_mode, goal_mode_src = goal_ref_mod.resolve_mode(
-            getattr(args, "ref_from_goal", None), cfg)
-        goal_settings = goal_ref_mod.settings(cfg, getattr(args, "ref_from_goal_hours", None))
+        goal_mode, goal_mode_src = goal_ref_mod.resolve_mode(cfg)
+        goal_settings = goal_ref_mod.settings(cfg)
         goal_plan = goal_ref_mod.plan(
             op_dir, mode=goal_mode, oracle_mode=oracle_mode, oracle_paths=declared_oracle,
             milestone_valid=_milestone_valid(milestone))
     except goal_ref_mod.GoalRefError as e:
         sys.stderr.write(f"[loop] error: ref_from_goal: {e}\n")
-        if not args.dry_run:
+        if not plan_only:
             return EXIT_GOAL_REF_UNAVAILABLE
         goal_mode, goal_mode_src = "?", "error"
         goal_settings = goal_ref_mod.Settings()
         goal_plan = goal_ref_mod.Plan("off", f"a real run would refuse: {e}")
-    if goal_plan.gives_oracle:
-        args.oracle = None          # "always": the declared oracle is not this run's input
     if goal_plan.action == "reuse":
-        if not args.dry_run:
+        if not plan_only:
             try:
                 goal_ref_mod.ensure_reference_tree(root, args.op, op_dir, goal_plan.state)
             except goal_ref_mod.GoalRefError as e:
                 sys.stderr.write(f"[loop] error: ref_from_goal: {e}\n")
                 return EXIT_GOAL_REF_UNAVAILABLE
-        cfg, goal_arch = goal_ref_mod.apply(cfg, goal_plan.state, target_ms=args.target_ms,
-                                            st=goal_settings)
+        cfg, goal_arch = goal_ref_mod.apply(cfg, goal_plan.state, target_ms=args.target_ms)
         oracle_mode = ORACLE_SOURCE
         oracle = _resolve_oracle(oracle_mode, None, cfg)
         print(f"[loop] ref_from_goal: {goal_plan.why} — oracle = {oracle}; target: "
@@ -2409,16 +2118,16 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"[loop] ref_from_goal = {goal_mode} ({goal_mode_src}): {goal_plan.why} — "
               f"a /goal session generates the reference first "
               f"({goal_settings.hours:g} h budget)", flush=True)
-    language = _resolve_language(args.language, cfg, args.kernel_file)
-    language_problem = lang_mode.language_problem(language, args.kernel_file)
-    if language_problem and not args.dry_run:
+    language = _resolve_language(None, cfg, kernel_file)
+    language_problem = lang_mode.language_problem(language, kernel_file)
+    if language_problem and not plan_only:
         sys.stderr.write(f"[loop] error: {language_problem}\n")
         return EXIT_LANGUAGE_MISMATCH
-    gate_window = _resolve_gate_window(args.gate_window, cfg)
-    kb_arch = _resolve_kb_arch(args.kb_arch, cfg)
+    gate_window = _resolve_gate_window(None, cfg)
+    kb_arch = _resolve_kb_arch(None, cfg)
     kb_root = root / lang_mode.kb_root_name(language)
     kb_arch_problem = _kb_arch_problem(kb_root, kb_arch)
-    if kb_arch_problem and not args.dry_run:
+    if kb_arch_problem and not plan_only:
         sys.stderr.write(f"[loop] error: kb_arch = {kb_arch!r}: {kb_arch_problem}\n")
         return EXIT_KB_ARCH_MISSING
 
@@ -2426,13 +2135,9 @@ def _main(argv: list[str] | None = None) -> int:
     # kept offline and away from the reference source in every run; a blackbox run's
     # teacher is kept away from it too, which needs the card to say where it lives.
     # An empty dsl_source_dirs on a cutedsl run is derived from the DSL distribution
-    # installed here (loop/dsl_source.py) — checked against the job's DSL_PIN and the
-    # declared reference source before the student is pointed at it. Reading the
-    # card's [env] rather than the whole validated config is deliberate: a card whose
-    # submit config is broken must not silently lose the version gate (see _card_env).
-    card_env = _card_env(args.op, root)
-    dsl_source = dsl_source_mod.resolve(
-        cfg, language=language, submit_env=card_env, pin_readable=card_env is not None)
+    # installed here (loop/dsl_source.py), checked against the declared reference
+    # source before the student is pointed at it.
+    dsl_source = dsl_source_mod.resolve(cfg, language=language)
     if dsl_source.defaulted:
         for n in dsl_source.notes:
             sys.stderr.write(f"[loop] {n}\n")
@@ -2442,11 +2147,11 @@ def _main(argv: list[str] | None = None) -> int:
     # The policy is delivered as project settings in the agent's working directory; a
     # leg that skips project settings or leaves the directory would run unrestricted.
     policy_problems += agent_policy_mod.command_findings(
-        window_cmds, dict(os.environ), args.workspace)
+        agent_cmds, dict(os.environ), args.workspace)
     if policy_problems:
         for f in policy_problems:
             sys.stderr.write(f"[loop]   {f}\n")
-        if not args.dry_run:
+        if not plan_only:
             sys.stderr.write(
                 f"[loop] error: refusing to start: the agent policy (student offline, no "
                 f"reference source) could not be guaranteed — fix the findings above "
@@ -2462,22 +2167,17 @@ def _main(argv: list[str] | None = None) -> int:
     # to it (a target-ms-only run has no second window to compare against), and
     # only fresh starts refuse: a run already on record predates the rule and
     # resumes with a warning.
+    resuming = _status_has_records(status_path) or _launch_admitted(op_dir, status_path)
     window_state, window_contract, window_problems_w = _window_preflight(
-        op_dir, cfg, resuming=_status_has_records(status_path)
-        or _launch_admitted(op_dir, status_path))
+        op_dir, cfg, resuming=resuming)
     if window_problems_w:
         for f in window_problems_w:
             sys.stderr.write(f"[loop]   {f}\n")
-        if window_state == "refuse" and args.allow_undeclared_window:
-            sys.stderr.write(
-                "[loop] WARNING: --allow-undeclared-window given — the ratio this run "
-                "is judged on may carry an unaccounted contract tax.\n")
-        elif window_state == "refuse" and not args.dry_run:
+        if window_state == "refuse" and not plan_only:
             sys.stderr.write(
                 f"[loop] error: refusing to start with an undeclared / inconsistent "
-                f"timed-window contract (operators/{args.op}/{WINDOW_FILENAME}) — "
-                f"declare it (`forge {args.op} window` checks it), or pass "
-                f"--allow-undeclared-window to declare the gap on purpose.\n")
+                f"timed-window contract (operators/{args.op}/{WINDOW_FILENAME}) — `forge "
+                f"run` generates it from the judge's signature; see the findings above.\n")
             return EXIT_WINDOW_UNDECLARED  # NOT 12: that already means "chain contract"
         elif window_state == "warn":
             sys.stderr.write(
@@ -2490,10 +2190,9 @@ def _main(argv: list[str] | None = None) -> int:
     # resuming runs (which predate the rule or are mid-run) only warn.
     workload_problems = bench_workloads_preflight(op_dir)
     if workload_problems:
-        resuming_wl = _status_has_records(status_path) or _launch_admitted(op_dir, status_path)
         for f in workload_problems:
             sys.stderr.write(f"[loop]   {f}\n")
-        if resuming_wl or args.allow_single_workload or args.dry_run:
+        if resuming or plan_only:
             sys.stderr.write(
                 "[loop] WARNING: this card's perf verdict rests on one input set — "
                 "the kept kernel can be tuned to it and regress on the shape's other "
@@ -2501,24 +2200,14 @@ def _main(argv: list[str] | None = None) -> int:
         else:
             sys.stderr.write(
                 "[loop] error: refusing to start a card whose eval/bench.py does not "
-                "time several workloads of its shape (timing.measure_windows_workloads) "
-                "— fix the bench, or pass --allow-single-workload to declare the gap "
-                "on purpose.\n")
+                "time several workloads of its shape (timing.measure_windows_workloads).\n")
             return EXIT_SINGLE_WORKLOAD
-
-    if goal_plan.runs_session and not args.dry_run:
-        # Refuse now, before the fresh-start gate, if no agent command can serve a
-        # /goal session.
-        if (why := _goal_ref_agent_problem(args)) is not None:
-            sys.stderr.write(f"[loop] error: ref_from_goal: {why}\n")
-            return EXIT_GOAL_REF_UNAVAILABLE
 
     # Fresh-start contamination gate: checked before anything is measured or
     # distilled, so refusal costs nothing — after it, every phase would resume
     # from whatever products are on disk without recording whose they were.
     # Applies only to runs that author their own products (there is distillation
-    # input): an oracle_mode=none run *reads* the milestone on disk, and reusing
-    # an archived baseline there is the documented design, not contamination.
+    # input).
     fresh_findings: list[str] = []
     if ((_has_distillation_input(oracle, oracle_mode) or goal_plan.runs_session)
             and not args.allow_preexisting_artifacts):
@@ -2528,7 +2217,7 @@ def _main(argv: list[str] | None = None) -> int:
         fresh_findings = fresh_start_contamination(
             op_dir, milestone, status_path, meta_status_path, recon_probe,
             evidence_dir=op_dir / "evidence")
-    if fresh_findings and not args.dry_run:
+    if fresh_findings and not plan_only:
         sys.stderr.write(
             f"[loop] error: fresh start (no records in {status_path}) but "
             f"{len(fresh_findings)} phase product(s) already on disk — a previous "
@@ -2540,7 +2229,7 @@ def _main(argv: list[str] | None = None) -> int:
             ".forge-loop/crash-backup-<ts>/), or pass "
             "--allow-preexisting-artifacts to declare the reuse.\n")
         return 9  # NOT 8: that already means "KB leak lint found provenance"
-    if not args.dry_run:
+    if not plan_only:
         # Ownership transfer: the tree just passed the gate (or the reuse was
         # declared), so everything the run writes from here on — baselines, recon
         # findings, the milestone — belongs to it, and a crash anywhere in the
@@ -2552,9 +2241,13 @@ def _main(argv: list[str] | None = None) -> int:
     # ref_from_goal: generate (or finish generating) the reference now — after the gate,
     # so its products belong to this run, and before the architecture reference and the
     # library baseline, which it may stand in for (goal_ref.apply).
-    if goal_plan.runs_session and not args.dry_run:
+    if goal_plan.runs_session and not plan_only:
+        if not agent_cmds:
+            sys.stderr.write("[loop] error: ref_from_goal: no --agent-cmd / "
+                             "--teacher-agent-cmd to run the /goal session with\n")
+            return EXIT_GOAL_REF_UNAVAILABLE
         gen = goal_ref_mod.Generation(
-            op=args.op, op_dir=op_dir, root=root, cfg=cfg, kernel_file=args.kernel_file,
+            op=args.op, op_dir=op_dir, root=root, cfg=cfg, kernel_file=kernel_file,
             language=language, gate_window=gate_window, target_ms=args.target_ms,
             agent_cmd=args.teacher_agent_cmd or args.agent_cmd,
             # the student's deny list, with the network on (no cluster CLIs)
@@ -2565,10 +2258,10 @@ def _main(argv: list[str] | None = None) -> int:
                 dsl_source_dirs_default=dsl_source.dirs if dsl_source.defaulted else (),
                 language=language), student_online=True,
                 deny_write=tuple(goal_ref_mod.session_read_only_paths(op_dir))),
-            make_backend=goal_ref_backend(args.op, cfg, args.git_name, args.git_email),
+            make_backend=goal_ref_backend(args.op, cfg, GIT_NAME, GIT_EMAIL),
             settings=goal_settings,
             kb_dirs=[str(kb_root / kb_arch)] if (kb_root / kb_arch).is_dir() else [],
-            heartbeat_s=args.agent_heartbeat_s or 600.0)
+            heartbeat_s=AGENT_HEARTBEAT_S)
         gen.read_dirs = [str(p) for p in gen.policy.dsl_source_dirs]
         try:
             gen_state = goal_ref_mod.generate(
@@ -2576,8 +2269,7 @@ def _main(argv: list[str] | None = None) -> int:
         except goal_ref_mod.GoalRefError as e:
             sys.stderr.write(f"[loop] error: {e}\n")
             return EXIT_GOAL_REF_FAILED
-        cfg, goal_arch = goal_ref_mod.apply(cfg, gen_state, target_ms=args.target_ms,
-                                            st=goal_settings)
+        cfg, goal_arch = goal_ref_mod.apply(cfg, gen_state, target_ms=args.target_ms)
         oracle_mode = ORACLE_SOURCE
         oracle = _resolve_oracle(oracle_mode, None, cfg)
         print(f"[loop] ref_from_goal: oracle = {oracle}; target: {goal_arch['why']}",
@@ -2592,8 +2284,8 @@ def _main(argv: list[str] | None = None) -> int:
     # a library measurement plus a distillation.
     will_distill = _will_distill(milestone, oracle, oracle_mode)
     arch_baseline = _ensure_arch_baseline(
-        args.op, op_dir, cfg, measure=not args.dry_run)
-    if not args.dry_run and (why := check_arch_ref_ready(
+        args.op, op_dir, cfg, measure=not plan_only)
+    if not plan_only and (why := check_arch_ref_ready(
             cfg, arch_baseline, will_distill=will_distill)):
         sys.stderr.write(
             f"[loop] error: refusing to distil a milestone without the architecture "
@@ -2604,19 +2296,19 @@ def _main(argv: list[str] | None = None) -> int:
             f"--mode {cfg.get('loop', {}).get('arch_ref_mode', '<mode>')}\n")
         return 6
 
-    # The archived ref baseline (forge <op> baseline) is what every gate in v1 is
-    # anchored to, and where target_ms comes from unless overridden.
+    # The archived ref baseline is what every gate in v1 is anchored to, and where
+    # target_ms comes from unless overridden.
     try:
         ref_baseline = _ensure_ref_baseline(
-            args.op, op_dir, milestone, oracle, cfg, args.ref_repeat,
-            mode=oracle_mode, measure=not args.dry_run, arch=arch_baseline)
+            args.op, op_dir, milestone, oracle, cfg, REF_REPEAT,
+            mode=oracle_mode, measure=not plan_only, arch=arch_baseline)
     except ValueError as e:
         sys.stderr.write(f"[loop] error: {e}\n")
         return 4
     try:
         target_ms = _resolve_target_ms(
             args.target_ms, ref_baseline, args.equivalence_ratio, arch=arch_baseline,
-            gate_window=gate_window, allow_host_bound=args.allow_host_bound_ref)
+            gate_window=gate_window)
     except ValueError as e:
         # gate_window="device" over a baseline that never measured the device
         # window, or measured it under a broken precondition (host-bound reference):
@@ -2624,9 +2316,7 @@ def _main(argv: list[str] | None = None) -> int:
         # is the reference's host tax rather than its kernel time.
         sys.stderr.write(f"[loop] error: {e}\n")
         return 7
-    if target_ms is None and not args.dry_run:
-        # A dry run legitimately has no target yet: the baseline it would derive one
-        # from has not been measured, because measuring is what a dry run skips.
+    if target_ms is None and not plan_only:
         declared = _resolve_ref_spec(cfg).get("ref_cmd")
         sys.stderr.write(
             f"[loop] error: no --target-ms and no ref baseline for {args.op}.\n")
@@ -2636,10 +2326,8 @@ def _main(argv: list[str] | None = None) -> int:
                 f"produced nothing — see the errors above.\n")
         else:
             sys.stderr.write(
-                f"[loop] declare how to measure the ref in operators/{args.op}/loop.toml:\n"
-                f"[loop]   [loop]\n"
-                f"[loop]   ref_cmd = \"python3 eval/measure_target.py\"\n"
-                f"[loop] (or pass --target-ms explicitly to run without a baseline)\n")
+                f"[loop] the task declares no reference to measure and no [target] ms: "
+                f"one of the two is needed to derive the stop threshold\n")
         return 5
 
     # The absolute target, the cluster scale and the finish's median-vs-median
@@ -2652,8 +2340,7 @@ def _main(argv: list[str] | None = None) -> int:
     if target_wl_problems:
         for f in target_wl_problems:
             sys.stderr.write(f"[loop]   {f}\n")
-        resuming_tw = _status_has_records(status_path) or _launch_admitted(op_dir, status_path)
-        if resuming_tw or args.dry_run:
+        if resuming or plan_only:
             sys.stderr.write(
                 "[loop] WARNING: the reference archive and the gate reading cover different "
                 "workloads — the driver will not stop on, or re-anchor from, the absolute "
@@ -2669,15 +2356,14 @@ def _main(argv: list[str] | None = None) -> int:
         cfg, oracle_mode=oracle_mode, repo_root=root, op=args.op,
         teacher_trees=_teacher_only_trees(
             cfg, root, args.op, oracle_mode,
-            _student_denied_oracle(oracle_mode, args.oracle, cfg, declared_oracle)),
+            _student_denied_oracle(oracle_mode, None, cfg, declared_oracle)),
         dsl_source_dirs_default=dsl_source.dirs if dsl_source.defaulted else (),
         language=language)
-    backend = RealBackend(args.op, workspace, args.agent_cmd, args.git_name, args.git_email,
+    backend = RealBackend(args.op, workspace, args.agent_cmd, GIT_NAME, GIT_EMAIL,
                           teacher_agent_cmd=args.teacher_agent_cmd, agent_policy=policy,
-                          agent_heartbeat_s=args.agent_heartbeat_s)
+                          agent_heartbeat_s=AGENT_HEARTBEAT_S)
     try:
-        backend.job_env_files = resolve_job_env_files(cfg, op_dir,
-                                                      kernel_file=args.kernel_file)
+        backend.job_env_files = resolve_job_env_files(cfg, op_dir, kernel_file=kernel_file)
     except ValueError as e:
         sys.stderr.write(f"[loop] error: {e}\n")
         return 2
@@ -2696,12 +2382,10 @@ def _main(argv: list[str] | None = None) -> int:
     except ValueError as e:
         sys.stderr.write(f"[loop] error: {e}\n")
         return 2
-    backend.kernel_file = args.kernel_file or ""
+    backend.kernel_file = kernel_file
     if guard_mode != harness_guard.GUARD_OFF:
         rc = _harness_guard_preflight(
-            op_dir, workspace, args.kernel_file or "", backend,
-            resuming=_status_has_records(status_path) or _launch_admitted(op_dir, status_path),
-            dry_run=bool(args.dry_run))
+            op_dir, workspace, kernel_file, backend, resuming=resuming, dry_run=plan_only)
         if rc:
             return rc
     # The precision gate (loop/precision_gate.py): what a failed precision check costs.
@@ -2710,10 +2394,8 @@ def _main(argv: list[str] | None = None) -> int:
     except ValueError as e:
         sys.stderr.write(f"[loop] error: {e}\n")
         return 2
-    rc = _precision_preflight(
-        op_dir, precision_contract, precision_defaulted,
-        resuming=_status_has_records(status_path) or _launch_admitted(op_dir, status_path),
-        dry_run=bool(args.dry_run))
+    rc = _precision_preflight(op_dir, precision_contract, precision_defaulted,
+                              resuming=resuming, dry_run=plan_only)
     if rc:
         return rc
     precision_bench_reports = (precision_contract != precision_gate.OFF
@@ -2730,10 +2412,10 @@ def _main(argv: list[str] | None = None) -> int:
         recon_dir = operators_dir(root) / recon_op
         if (recon_dir / ".git").is_dir():
             recon_backend = RealBackend(recon_op, recon_dir, args.agent_cmd,
-                                        args.git_name, args.git_email,
+                                        GIT_NAME, GIT_EMAIL,
                                         teacher_agent_cmd=args.teacher_agent_cmd,
                                         agent_policy=policy,
-                                        agent_heartbeat_s=args.agent_heartbeat_s)
+                                        agent_heartbeat_s=AGENT_HEARTBEAT_S)
             recon_path = recon_dir / "report.md"
         elif oracle_mode == ORACLE_BLACKBOX:
             sys.stderr.write(
@@ -2748,26 +2430,19 @@ def _main(argv: list[str] | None = None) -> int:
                 f"source states only as a template go unmeasured). Create the tree, "
                 f"point [loop] recon_op at one, or set recon_op = \"\" to declare a "
                 f"source-only control run on purpose.\n")
-    # The hardware calculator (kernel-resource-simulator's smem.py) is reconnaissance
-    # channel 4: pure-python occupancy/wave arithmetic the teacher runs locally to
-    # falsify candidate architectures. Optional — without it the prompt says so and
-    # the teacher simply has one channel fewer.
     evidence_dir = recon_dir if recon_backend is not None else op_dir / "evidence"
     ref_price_dir, ref_price_backend, ref_price_app = _resolve_ref_pricing(
         cfg, root, recon_dir, recon_backend,
-        lambda op, d: RealBackend(op, d, None, args.git_name, args.git_email),
+        lambda op, d: RealBackend(op, d, None, GIT_NAME, GIT_EMAIL),
         recon_op=_recon_op(cfg, oracle_mode))
-    simulator_dir = None
-    if sim := cfg.get("loop", {}).get("simulator_dir"):
-        simulator_dir = Path(sim).expanduser()
-        if not (simulator_dir / "smem.py").is_file():
-            sys.stderr.write(f"[loop] warning: simulator_dir {simulator_dir} has no "
-                             f"smem.py — recon channel 4 will be unavailable.\n")
-            simulator_dir = None
     ref_in_job = _resolve_ref_in_job(cfg, _resolve_ref_spec(cfg))
+    # The channels that need NCU (the timeline probe, stall pricing, the orchestration
+    # census) are the only loop.toml knobs left: `forge run` turns them off on a machine
+    # whose counters cannot be read, and a leaderboard card turns the timeline probe on.
+    lc = cfg.get("loop", {})
     ctx = LoopContext(
         op=args.op, workspace=workspace, milestone=milestone, kb_dir=kb_root,
-        status_path=status_path, meta_dir=root / "meta", kernel_file=args.kernel_file,
+        status_path=status_path, meta_dir=root / "meta", kernel_file=kernel_file,
         meta_status_path=meta_status_path,
         branch_prefix=branch_prefix, target_ms=target_ms,
         language=language, gate_window=gate_window, kb_arch=kb_arch,
@@ -2777,31 +2452,21 @@ def _main(argv: list[str] | None = None) -> int:
         decisions_dag=[],  # empty -> the driver parses the milestone §4 DAG per meta step
         oracle_path=oracle, oracle_mode=oracle_mode,
         recon_backend=recon_backend, recon_dir=recon_dir, recon_path=recon_path,
-        simulator_dir=simulator_dir,
-        max_probe_rounds=args.max_probe_rounds,
-        kb_tripwire_rounds=args.kb_tripwire_rounds,
-        max_verdict_probe_rounds=args.max_verdict_probe_rounds,
-        infeasible_min_diagnoses=max(1, int(
-            args.min_meta_before_infeasible if args.min_meta_before_infeasible is not None
-            else cfg.get("loop", {}).get("infeasible_min_diagnoses", 1))),
-        lever_pricing_rounds=(args.lever_pricing_rounds if args.lever_pricing_rounds is not None
-                              else int(cfg.get("loop", {}).get("lever_pricing_rounds", 3))),
-        lever_pricing_max_levers=int(cfg.get("loop", {}).get("lever_pricing_max_levers", 5)),
-        reopen_requires_price=bool(cfg.get("loop", {}).get("reopen_requires_price", True)),
-        reopen_max_fruitless=max(0, int(cfg.get("loop", {}).get("reopen_max_fruitless", 2))),
-        reuse_unchanged_reading=_reuse_mode(cfg.get("loop", {}).get("reuse_unchanged_reading", "all")),
-        declared_gate_close=bool(cfg.get("loop", {}).get("declared_gate_close", True)),
+        max_probe_rounds=MAX_PROBE_ROUNDS,
+        kb_tripwire_rounds=KB_TRIPWIRE_ROUNDS,
+        max_verdict_probe_rounds=MAX_VERDICT_PROBE_ROUNDS,
+        infeasible_min_diagnoses=INFEASIBLE_MIN_DIAGNOSES,
+        lever_pricing_rounds=LEVER_PRICING_ROUNDS,
+        lever_pricing_max_levers=LEVER_PRICING_MAX_LEVERS,
+        reopen_max_fruitless=REOPEN_MAX_FRUITLESS,
         harness_guard=guard_mode,
         precision_contract=precision_contract,
         precision_bench_reports=precision_bench_reports,
-        max_consecutive_reverts=args.max_consecutive_reverts,
-        m0_audit=not args.no_m0_audit,
-        stall_pricing=bool(cfg.get("loop", {}).get("stall_pricing", True)),
-        reopen_in_place=bool(cfg.get("loop", {}).get("reopen_in_place", True)),
-        reprice_on_new_best=bool(cfg.get("loop", {}).get("reprice_on_new_best", True)),
-        reprice_min_gain_pct=float(cfg.get("loop", {}).get("reprice_min_gain_pct", 3.0)),
-        timeline_probe=str(cfg.get("loop", {}).get("timeline_probe", "off")),
-        orch_census=bool(cfg.get("loop", {}).get("orch_census", True)),
+        max_consecutive_reverts=MAX_CONSECUTIVE_REVERTS,
+        stall_pricing=bool(lc.get("stall_pricing", True)),
+        reprice_min_gain_pct=REPRICE_MIN_GAIN_PCT,
+        timeline_probe=str(lc.get("timeline_probe", "off")),
+        orch_census=bool(lc.get("orch_census", True)),
         # Single-ref contract: a ref measured through a separate submission tree
         # (ref_mode task or ref_cmd via submit_op — blackbox runs, source-leak)
         # never rides the student job, and a target-ms-only run has no ref to ride;
@@ -2813,23 +2478,19 @@ def _main(argv: list[str] | None = None) -> int:
         # currency; the ref tree keeps the launch baseline / NCU / recon duties.
         ref_in_job=ref_in_job,
         equivalence_ratio=float(args.equivalence_ratio),
-        # Suspicious-watermark confirmation margin (loop.toml [loop] watermark_margin,
-        # 0 disables): a new best beyond this fraction is re-measured before it
-        # anchors meta transactions.
-        watermark_margin=float(cfg.get("loop", {}).get("watermark_margin", 0.03)),
+        # Suspicious-watermark confirmation margin: a new best beyond this fraction is
+        # re-measured before it anchors meta transactions.
+        watermark_margin=WATERMARK_MARGIN,
         # Records are stamped with the machine they ran on and judged against
         # same-machine rows; on another machine (a resume elsewhere) the target is
         # restated from a reference measured there (the reanchor_ref channel below).
         home_cluster=_home_cluster(args.op),
-        # Phantom-gap re-anchor band (loop.toml [loop] reanchor_band, 0 disables):
-        # a gap-driven diagnosis whose residual sits inside this fraction first
-        # re-anchors the ref same-period — the ref-side mirror of watermark_margin.
-        reanchor_band=float(cfg.get("loop", {}).get("reanchor_band", 0.06)),
+        # Phantom-gap re-anchor band: a gap-driven diagnosis whose residual sits inside
+        # this fraction first re-anchors the ref same-period — the ref-side mirror of
+        # the watermark margin.
+        reanchor_band=REANCHOR_BAND,
         evidence_dir=evidence_dir, ref_price_dir=ref_price_dir,
         ref_price_backend=ref_price_backend, ref_price_app=ref_price_app,
-        # PM-sampling interval for the frozen pricing recipe (both trees); 0 =
-        # from the target reading (sub-0.5 ms kernels -> 2048, else 8192)
-        ref_price_pm_interval=int(cfg.get("loop", {}).get("ref_price_pm_interval", 0) or 0),
     )
     # The re-anchor's measurement channel: the same fresh-ref path the finish
     # confirmation uses (measure_ref_fresh — parsed readings, never archived, so
@@ -2869,136 +2530,9 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.harvest_only:
         return _harvest_only(ctx, args, root, milestone, oracle, cfg)
-    if args.dry_run:
-        print("[loop] dry-run plan:")
-        print(f"  op           = {args.op}")
-        print(f"  workspace    = {workspace}  (exists={workspace.exists()})")
-        print(f"  milestone    = {milestone}  (exists={milestone.exists()})")
-        print(f"  kb_dir       = {ctx.kb_dir}")
-        print(f"  kb_arch      = {ctx.kb_arch}  (reads/writes {kb_read_dir(ctx)}"
-              + (f" — MISSING: {kb_arch_problem}; a real run would refuse to start)"
-                 if kb_arch_problem else ")"))
-        dirty = kb_blockers(root, ctx.kb_dir)
-        print(f"  kb_state     = {'clean' if not dirty else f'{len(dirty)} UNCOMMITTED — a real run would refuse to start'}")
-        if _status_has_records(status_path):
-            fresh_state = "resume (status.jsonl has records)"
-        elif _launch_admitted(op_dir, status_path):
-            fresh_state = f"resume (admitted by an earlier launch: {_LAUNCH_SENTINEL_NAME})"
-        elif fresh_findings:
-            fresh_state = (f"{len(fresh_findings)} PRE-EXISTING phase product(s) — "
-                           f"a real run would refuse to start")
-        elif args.allow_preexisting_artifacts:
-            fresh_state = "fresh (pre-existing artifacts admitted by flag)"
-        else:
-            fresh_state = "fresh (no phase products on disk)"
-        print(f"  fresh_state  = {fresh_state}")
-        print(f"  status       = {status_path}")
-        print(f"  kernel_file  = {args.kernel_file}")
-        print(f"  correctness_monitor = "
-              f"{cfg.get('loop', {}).get('correctness_monitor', 'best')} "
-              f"(advisory; the finish runs the card's correctness under stressed inputs)")
-        if args.agent_cmd:
-            if window_problems:
-                agent_window_state = (f"200k CLAMP — {len(window_problems)} finding(s), a real run "
-                                f"would refuse to start without --allow-200k-window")
-            else:
-                agent_window_state = "ok (no bare claude id behind a gateway)"
-            print(f"  agent_window = {agent_window_state}")
-            for f in window_problems:
-                print(f"                 {f}")
-        # name the reference the number actually came from: the label used to say
-        # "ref" while the value was derived from whichever baseline won, which is the
-        # same class of mistake as the target itself being anchored to the wrong one.
-        if args.target_ms is not None:
-            origin = "--target-ms"
-        elif (src := arch_baseline or ref_baseline):
-            role = "architecture ref" if src is arch_baseline else "library baseline"
-            device_gated = gate_window == "device"
-            anchor = src.device_anchor_ms if device_gated else src.ms
-            basis = f", {src.device_anchor_basis}" if device_gated else ""
-            origin = (f"derived: {anchor} ms {role} ({gate_window} window{basis}"
-                      f"{f', {src.ref_name}' if src.ref_name else ''})"
-                      f" / {args.equivalence_ratio}")
-            # Same exemption target_ms() applies: a host-free anchor (graph replay
-            # or a CUPTI kernel span) is not refused there, so the dry-run must not
-            # display it as a refusal either (observed: this display line alone
-            # tripped a run script's refusal grep on a resume).
-            host_free_anchor = (src.ms_device_graph is not None
-                                or src.device_anchor_basis in HOST_FREE_BASES)
-            if device_gated and src.host_bound.host_bound and not host_free_anchor:
-                origin += "  <- HOST-BOUND reference; a real run refuses this"
-            elif device_gated and not src.host_bound.measured:
-                origin += "  (host-bound precondition UNCHECKED)"
-        else:
-            origin = f"will be derived from a reference / {args.equivalence_ratio}"
-        shown = f"{target_ms:g}" if target_ms is not None else "(pending measurement)"
-        print(f"  target_ms    = {shown}  ({origin})")
-        print(f"  gate_window  = {gate_window}")
-        print(f"  window       = {_window_dry_run_line(window_state, window_contract, window_problems_w, args.allow_undeclared_window)}")
-        if arch_baseline:
-            print(f"  arch_ref     = {arch_baseline.ref_name or 'oracle'} {arch_baseline.ms} ms"
-                  f"  <- target anchors here")
-        if ref_baseline:
-            print(f"  ref_baseline = {ref_baseline.ref_name or 'ref'} {ref_baseline.ms} ms, "
-                  f"job {ref_baseline.job or '?'}, "
-                  f"ncu={'yes' if ref_baseline.has_ncu else 'no'}")
-        elif (spec := _resolve_ref_spec(cfg)).get("ref_cmd") or spec.get("ref_mode"):
-            how = spec.get("ref_cmd") or (f"task '{spec['ref_mode']}' via "
-                                          f"{spec.get('submit_op') or args.op}")
-            print(f"  ref_baseline = (none — a real run would measure it first: "
-                  f"{args.ref_repeat}x {how}"
-                  f"{' + NCU' if spec.get('ref_ncu_cmd') else ''})")
-        else:
-            print("  ref_baseline = (none, and no [loop] ref_cmd/ref_mode declared — "
-                  "a real run would refuse to distill)")
-        print(f"  budget       = {args.hours}h  (deadline {time.strftime('%H:%M:%S', time.localtime(ctx.deadline_epoch))})")
-        print(f"  branch_pref  = {branch_prefix}")
-        print(f"  agent_cmd    = {args.agent_cmd or '(none — set --agent-cmd for a real run)'}")
-        print(f"  teacher_cmd  = {args.teacher_agent_cmd or '(same as agent_cmd)'}")
-        if ref_in_job:
-            print(f"  ref_in_job   = True  (same-job ratio is the parity currency; "
-                  f"equivalence {args.equivalence_ratio})")
-        print(f"  oracle_mode  = {oracle_mode}")
-        print(f"  policy       = student offline; student denied "
-              f"{[str(p) for p in policy.deny_read('student')] or 'nothing'}; teacher denied "
-              f"{[str(p) for p in policy.deny_read('teacher')] or 'nothing'}"
-              + (f"; teacher web block {list(policy.deny_urls('teacher'))}"
-                 if policy.deny_urls('teacher') else ""))
-        print(f"  dsl_source   = {dsl_source.describe()}")
-        print(f"  oracle       = {oracle or _ORACLE_PLAN.get(oracle_mode, '(none configured)')}")
-        print(f"  ref_from_goal = {goal_mode} ({goal_mode_src}) -> {goal_plan.action}: "
-              f"{goal_plan.why}")
-        if goal_plan.runs_session:
-            bar = goal_ref_mod.resolve_bar(cfg, op_dir, target_ms=args.target_ms,
-                                           ratio=goal_settings.ratio, gate_window=gate_window)
-            print(f"                 a /goal session ({goal_settings.hours:g} h, jobs via "
-                  f"operators/{goal_ref_mod.tree_op(args.op)}) writes the oracle; speed bar: "
-                  f"{bar['text']}; then {goal_settings.accept_runs} acceptance run(s)")
-            if (why := _goal_ref_agent_problem(args)) is not None:
-                print(f"                 ! a real run would refuse: {why}")
-        if recon_dir is not None:
-            print(f"  recon        = {recon_dir if recon_backend else '(MISSING — no git repo at ' + str(recon_dir) + ')'}"
-                  + ("  (source mode: measured facts join the oracle)"
-                     if oracle_mode == ORACLE_SOURCE else ""))
-            print(f"  simulator    = {simulator_dir or '(none — recon channel 4 unavailable)'}")
-        print(f"  config       = {cfg or '(no loop.toml)'}")
-        if not milestone.exists():
-            # absence is the normal pre-distillation state; only a run with no
-            # distillation input at all leaves the student nothing to read
-            if _has_distillation_input(oracle, oracle_mode):
-                src = ("black-box reconnaissance" if oracle_mode == ORACLE_BLACKBOX
-                       else "the oracle + reconnaissance" if recon_backend is not None
-                       else "the oracle")
-                print(f"  NOTE: milestone not written yet — meta will distill v1 from {src}.")
-            else:
-                print("  WARNING: milestone missing and no distillation input "
-                      "(oracle_mode=none) — the student would have nothing to read.")
-        if not args.agent_cmd:
-            print("  NOTE: --agent-cmd required for a real run.")
-        return 0
 
     if not args.agent_cmd:
-        sys.stderr.write("[loop] error: --agent-cmd is required for a real run (or use --dry-run)\n")
+        sys.stderr.write("[loop] error: --agent-cmd is required\n")
         return 2
 
     # The workspace must be able to push: every student iteration commits there and
@@ -3011,7 +2545,7 @@ def _main(argv: list[str] | None = None) -> int:
             f"should be a single-branch clone of the operator repo:\n"
             f"[loop]   git clone --single-branch --branch main "
             f"{op_dir} {workspace}\n")
-        return 6
+        return EXIT_NO_REMOTE
 
     # Nothing in this system commits hw_kb, so an unharvested recipe from an earlier
     # run is one `git checkout` away from gone. Starting on top of it also stacks a
@@ -3057,10 +2591,10 @@ def _main(argv: list[str] | None = None) -> int:
     # this run's read set, so a leak there cannot reach this student and must
     # not stop this launch (it stops that architecture's).
     leaks = lint_kb_dir(kb_read_dir(ctx), extra_tokens=oracle_tokens)
-    if leaks and not args.skip_kb_lint:
+    if leaks:
         sys.stderr.write(
             f"[loop] error: KB leak lint found {len(leaks)} finding(s) in {kb_read_dir(ctx)} — move "
-            f"reference provenance to docs/kb-provenance/ (or pass --skip-kb-lint):\n")
+            f"reference provenance to docs/kb-provenance/:\n")
         for f in leaks:
             sys.stderr.write(f"[loop]   {f}\n")
         return 8  # NOT 7: that already means "target_ms underivable for gate_window"
@@ -3078,7 +2612,7 @@ def _main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"[loop] error: [loop] job_env_preflight = {jpolicy!r} — expected "
                          f"one of {', '.join(JOB_ENV_PREFLIGHT_POLICIES)}\n")
         return 2
-    if not args.dry_run and (why := job_env_preflight(ctx, jpolicy)) and jpolicy == "refuse":
+    if (why := job_env_preflight(ctx, jpolicy)) and jpolicy == "refuse":
         sys.stderr.write(
             f"[loop] error: the job environment cannot run the harness's own channels — "
             f"{why}.\n"
@@ -3087,19 +2621,6 @@ def _main(argv: list[str] | None = None) -> int:
             f"job_env_files so a fix in the card reaches the jobs of a run in progress), or set "
             f"[loop] job_env_preflight = \"warn\" to run without those channels on purpose.\n")
         return 13  # NOT 12: that already means "chain member's bench breaks its contract"
-
-    mon_policy = str(cfg.get("loop", {}).get("correctness_monitor", "best"))
-    if mon_policy not in monitor_mod.POLICIES:
-        sys.stderr.write(f"[loop] error: [loop] correctness_monitor = {mon_policy!r} — expected "
-                         f"one of {', '.join(monitor_mod.POLICIES)}\n")
-        return 2
-    mon_profiles = tuple(cfg.get("loop", {}).get("correctness_monitor_profiles")
-                         or monitor_mod.DEFAULT_PROFILES)
-    try:
-        monitor_mod.job_mode(mon_profiles, args.kernel_file)
-    except ValueError as e:
-        sys.stderr.write(f"[loop] error: [loop] correctness_monitor_profiles: {e}\n")
-        return 2
 
     try:
         summary = run_two_layer(ctx, max_meta=args.max_meta)
@@ -3114,81 +2635,78 @@ def _main(argv: list[str] | None = None) -> int:
     # Best-sha confirmation runs after the stop so it never competes with iterations
     # for budget, and before harvest so the ratio lands in the log next to the run's
     # verdicts. Its own failure must not cost the harvest below.
-    confirm_jobs = args.confirm_jobs if args.confirm_jobs is not None else \
-        int(cfg.get("loop", {}).get("confirm_jobs", 3))
     confirm = None
-    if confirm_jobs > 0:
-        # A same-job parity stop named its own sha (not necessarily the absolute
-        # best) and already bought same-period samples of it: confirm THAT sha,
-        # counting those samples, or the report would carry a different sha —
-        # possibly reading below parity — next to the verdict that stopped the run.
-        paired = getattr(ctx, "paired_stop", None) or {}
-        try:
-            confirm = run_best_confirmation(
-                ctx, jobs=confirm_jobs, ref=paired.get("sha"),
-                seed_samples=paired.get("samples"))
-        except Exception as e:
-            print(f"[loop] confirm: stage failed ({e}) — continuing to harvest", flush=True)
-            confirm = None
-        if confirm and "median_ratio" not in confirm:
-            # No same-job ratio came back (out-of-job ref, target-ms-only, or a
-            # bench that produced no in-job ref reading), so the ratio must be
-            # median-vs-median: re-anchor the ref through its own channel NOW —
-            # against the frozen loop-start archive, node drift over the run's
-            # hours would read as kernel change.
-            ref_spec = _resolve_ref_spec(cfg)
-            if not ref_spec:
-                print("[loop] confirm: no ref declared (target-ms-only run) — "
-                      "the absolute median is the claim", flush=True)
-            else:
-                try:
-                    from forgekernel.baseline_cli import measure_ref_fresh
-                    runs = measure_ref_fresh(args.op, ref_spec, repeat=confirm_jobs)
-                    key = "ms_device" if ctx.gate_window == "device" else "ms"
-                    ref_samples = [r[key] for r in runs if r.get(key) is not None]
-                    if wl_why := _fresh_ref_workloads_mismatch(runs, confirm):
-                        confirm["ref_workloads_mismatch"] = wl_why
-                        print(f"[loop] confirm: no median-vs-median ratio — {wl_why}; "
-                              f"reporting the student median only", flush=True)
-                    elif ref_samples:
-                        confirm["ref_samples_ms"] = ref_samples
-                        confirm["ref_median_ms"] = statistics.median(ref_samples)
-                        confirm["median_ratio"] = confirm["ref_median_ms"] / confirm["median_ms"]
-                        print(f"[loop] confirm: median-vs-median ratio "
-                              f"{confirm['median_ratio']:.4f} (student {confirm['median_ms']} ms "
-                              f"over {len(confirm['jobs'])} job(s), ref {confirm['ref_median_ms']} ms "
-                              f"over {len(ref_samples)} job(s), {ctx.gate_window} window)", flush=True)
-                    else:
-                        print("[loop] confirm: ref re-anchor yielded no usable reading — "
-                              "reporting the student median only", flush=True)
-                except Exception as e:
-                    print(f"[loop] confirm: ref re-anchor failed ({e}) — "
-                          f"reporting the student median only", flush=True)
-        if confirm:
-            # The declared contract tax, priced off the confirmed sha's per-kernel
-            # table against the ref median settled above (either path). Reported
-            # next to the raw ratio, never in its place.
+    # A same-job parity stop named its own sha (not necessarily the absolute
+    # best) and already bought same-period samples of it: confirm THAT sha,
+    # counting those samples, or the report would carry a different sha —
+    # possibly reading below parity — next to the verdict that stopped the run.
+    paired = getattr(ctx, "paired_stop", None) or {}
+    try:
+        confirm = run_best_confirmation(
+            ctx, jobs=CONFIRM_JOBS, ref=paired.get("sha"),
+            seed_samples=paired.get("samples"))
+    except Exception as e:
+        print(f"[loop] confirm: stage failed ({e}) — continuing to harvest", flush=True)
+        confirm = None
+    if confirm and "median_ratio" not in confirm:
+        # No same-job ratio came back (out-of-job ref, target-ms-only, or a
+        # bench that produced no in-job ref reading), so the ratio must be
+        # median-vs-median: re-anchor the ref through its own channel NOW —
+        # against the frozen loop-start archive, node drift over the run's
+        # hours would read as kernel change.
+        ref_spec = _resolve_ref_spec(cfg)
+        if not ref_spec:
+            print("[loop] confirm: no ref declared (target-ms-only run) — "
+                  "the absolute median is the claim", flush=True)
+        else:
             try:
-                credit = apply_window_credit(ctx, confirm)
-            except Exception as e:  # noqa: BLE001 — a diagnostic must not cost the harvest
-                print(f"[loop] confirm: window credit failed ({e})", flush=True)
-                credit = None
-            summary["confirm"] = {k: confirm[k] for k in
-                                  ("median_ms", "median_ratio") if k in confirm}
-            if credit and credit.get("credited_ratio") is not None:
-                summary["confirm"]["credited_ratio"] = credit["credited_ratio"]
-            summary["confirm"]["n"] = len(confirm["jobs"])
-            summary["confirm"]["sha"] = confirm["sha"][:10]
-            out = op_dir / "best_confirmation.json"
-            out.write_text(json.dumps(confirm, indent=1), encoding="utf-8")
-            print(f"[loop] confirm: archived -> {out}", flush=True)
+                from forgekernel.baseline_cli import measure_ref_fresh
+                runs = measure_ref_fresh(args.op, ref_spec, repeat=CONFIRM_JOBS)
+                key = "ms_device" if ctx.gate_window == "device" else "ms"
+                ref_samples = [r[key] for r in runs if r.get(key) is not None]
+                if wl_why := _fresh_ref_workloads_mismatch(runs, confirm):
+                    confirm["ref_workloads_mismatch"] = wl_why
+                    print(f"[loop] confirm: no median-vs-median ratio — {wl_why}; "
+                          f"reporting the student median only", flush=True)
+                elif ref_samples:
+                    confirm["ref_samples_ms"] = ref_samples
+                    confirm["ref_median_ms"] = statistics.median(ref_samples)
+                    confirm["median_ratio"] = confirm["ref_median_ms"] / confirm["median_ms"]
+                    print(f"[loop] confirm: median-vs-median ratio "
+                          f"{confirm['median_ratio']:.4f} (student {confirm['median_ms']} ms "
+                          f"over {len(confirm['jobs'])} job(s), ref {confirm['ref_median_ms']} ms "
+                          f"over {len(ref_samples)} job(s), {ctx.gate_window} window)", flush=True)
+                else:
+                    print("[loop] confirm: ref re-anchor yielded no usable reading — "
+                          "reporting the student median only", flush=True)
+            except Exception as e:
+                print(f"[loop] confirm: ref re-anchor failed ({e}) — "
+                      f"reporting the student median only", flush=True)
+    if confirm:
+        # The declared contract tax, priced off the confirmed sha's per-kernel
+        # table against the ref median settled above (either path). Reported
+        # next to the raw ratio, never in its place.
+        try:
+            credit = apply_window_credit(ctx, confirm)
+        except Exception as e:  # noqa: BLE001 — a diagnostic must not cost the harvest
+            print(f"[loop] confirm: window credit failed ({e})", flush=True)
+            credit = None
+        summary["confirm"] = {k: confirm[k] for k in
+                              ("median_ms", "median_ratio") if k in confirm}
+        if credit and credit.get("credited_ratio") is not None:
+            summary["confirm"]["credited_ratio"] = credit["credited_ratio"]
+        summary["confirm"]["n"] = len(confirm["jobs"])
+        summary["confirm"]["sha"] = confirm["sha"][:10]
+        out = op_dir / "best_confirmation.json"
+        out.write_text(json.dumps(confirm, indent=1), encoding="utf-8")
+        print(f"[loop] confirm: archived -> {out}", flush=True)
     # Correctness monitor on the sha the run's claim rests on: the card's own
     # correctness task under fresh seeds and reshaped inputs, plus a watch on the
     # kernel's outputs (forgekernel.monitor). Advisory: it is recorded next to the
     # confirmation and in correctness_monitor.jsonl, and costs nothing else.
-    if mon_policy == "best" and summary.get("stop") != "backend_error":
-        _run_finish_monitor(ctx, backend, op_dir, confirm, summary, mon_profiles,
-                            args.kernel_file)
+    if summary.get("stop") != "backend_error":
+        _run_finish_monitor(ctx, backend, op_dir, confirm, summary,
+                            monitor_mod.DEFAULT_PROFILES, kernel_file)
     # kb-tripwire settlement: before scanning for harvest, give the expensive probe
     # victories their write-up turn so the recipes land in hw_kb and ride the same
     # harvest report below. Skipped when the run died on the agent

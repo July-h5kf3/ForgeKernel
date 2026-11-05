@@ -5,7 +5,6 @@ import pytest
 from forgekernel.baseline import RefBaseline
 from forgekernel.loop.cli import (
     ORACLE_BLACKBOX,
-    ORACLE_NONE,
     ORACLE_SOURCE,
     _resolve_oracle,
     _resolve_oracle_mode,
@@ -36,10 +35,6 @@ def test_oracle_default_on_from_config():
     assert _resolve_oracle(ORACLE_SOURCE, None, CFG) == "/ref/gemm.cu"
 
 
-def test_no_oracle_forbids_even_with_config():
-    assert _resolve_oracle(ORACLE_NONE, None, CFG) is None
-
-
 def test_explicit_oracle_overrides_config():
     assert _resolve_oracle(ORACLE_SOURCE, "/other.cu", CFG) == "/other.cu"
 
@@ -61,11 +56,6 @@ def test_no_config_no_flag_is_none():
     assert _resolve_oracle(ORACLE_SOURCE, None, {}) is None
 
 
-def test_no_oracle_wins_over_explicit_flag():
-    # --no-oracle is the strict switch; it beats an explicit --oracle too
-    assert _resolve_oracle(ORACLE_NONE, "/other.cu", CFG) is None
-
-
 def test_blackbox_withholds_a_configured_oracle():
     """The mode exists to deny source the operator does happen to have on disk.
 
@@ -78,33 +68,24 @@ def test_blackbox_withholds_a_configured_oracle():
 
 
 def test_blackbox_still_distills_and_therefore_still_needs_a_baseline(tmp_path):
-    """The bug this mode is built on top of: --no-oracle read as "no oracle path", and
-    both the distillation gate and the baseline gate asked only that question. So
-    "the teacher may not read source" silently became "do not distill, and do not
-    measure the baseline distillation anchors to" — the loop started against whatever
-    milestone was already on disk, with no way to tell that from a clean resume.
-    """
+    """Blackbox mode withholds the oracle PATH but still has an input to distil from
+    (reconnaissance of the reference), so it still measures the baseline distillation
+    anchors to; a source-mode run with nothing to read has no input."""
     ms = tmp_path / "milestone.md"
     ms.write_text("# empty skeleton, fails §9\n", encoding="utf-8")
     assert _will_distill(ms, None, ORACLE_BLACKBOX) is True
-    assert _will_distill(ms, None, ORACLE_NONE) is False
     assert _will_distill(ms, "/ref/gemm.cu", ORACLE_SOURCE) is True
     # source mode with nothing to read still has no input
     assert _will_distill(ms, None, ORACLE_SOURCE) is False
 
 
 def test_oracle_mode_resolution_and_conflicts():
-    assert _resolve_oracle_mode(False, None, {}) == ORACLE_SOURCE
-    assert _resolve_oracle_mode(True, None, {}) == ORACLE_NONE
-    assert _resolve_oracle_mode(False, None, {"loop": {"oracle_mode": "blackbox"}}) == ORACLE_BLACKBOX
-    # explicit flag beats config
-    assert _resolve_oracle_mode(
-        False, ORACLE_SOURCE, {"loop": {"oracle_mode": "blackbox"}}) == ORACLE_SOURCE
-    # --no-oracle alongside a contradicting mode is a config error, not a silent winner
+    assert _resolve_oracle_mode({}) == ORACLE_SOURCE
+    assert _resolve_oracle_mode({"loop": {"oracle_mode": "blackbox"}}) == ORACLE_BLACKBOX
     with pytest.raises(SystemExit):
-        _resolve_oracle_mode(True, ORACLE_BLACKBOX, {})
+        _resolve_oracle_mode({"loop": {"oracle_mode": "typo"}})
     with pytest.raises(SystemExit):
-        _resolve_oracle_mode(False, None, {"loop": {"oracle_mode": "typo"}})
+        _resolve_oracle_mode({"loop": {"oracle_mode": "none"}})
 
 
 def test_language_defaults_to_cutedsl():
@@ -437,8 +418,8 @@ def test_no_oracle_means_no_distillation_hence_no_measurement(tmp_path, monkeypa
                                 _REF_SPEC, 3) is None
 
 
-def test_dry_run_reports_the_measurement_without_making_it(tmp_path, monkeypatch):
-    """--dry-run validates config; a plan that spends GPU is not a plan."""
+def test_measure_false_reports_the_measurement_without_making_it(tmp_path, monkeypatch):
+    """--harvest-only builds its context without buying a job."""
     from forgekernel.loop.cli import _ensure_ref_baseline
     monkeypatch.setattr("forgekernel.baseline_cli.measure_and_archive",
                         lambda *a, **k: pytest.fail("dry-run must not submit a job"))
@@ -1099,9 +1080,6 @@ def test_recon_op_defaults_on_for_every_distilling_run():
     assert _recon_op({"loop": {"recon_op": False}}, ORACLE_SOURCE) is None
     # blackbox cannot opt out: it has nothing else to distil from
     assert _recon_op({"loop": {"recon_op": ""}}, ORACLE_BLACKBOX) == "_recon"
-    # and a run that does not distil never reconnoitres
-    assert _recon_op({}, ORACLE_NONE) is None
-    assert _recon_op({"loop": {"recon_op": "_ref"}}, ORACLE_NONE) is None
 
 
 def test_blackbox_recon_opt_out_is_refused_out_loud(capsys):

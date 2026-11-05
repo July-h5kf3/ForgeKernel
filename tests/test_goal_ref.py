@@ -123,7 +123,7 @@ def _gen(tmp_path: Path, kernels: list[str], *, hours: float = 1.0, linger: floa
         op="demo", op_dir=op_dir, root=root, cfg=cfg or {}, kernel_file="kernel.py",
         language="cutedsl", gate_window="device", target_ms=target_ms,
         agent_cmd=f"{sys.executable} {agent}", policy=None, make_backend=make_backend,
-        settings=gr.Settings(hours=hours, accept_runs=2), poll_s=0.05,
+        settings=gr.Settings(hours=hours), poll_s=0.05,
         kill_grace_s=kill_grace_s, report_s=report_s, log=lambda s: None,
         extra_env={"FK_GOALREF_POLL_S": "0.05", "FK_GOALREF_WAIT_S": "60"})
     return g, gpus, trace
@@ -136,13 +136,13 @@ FAST_OK = "def run(x, out):\n    out.copy_(x)\n# MS=0.8 # OK\n"
 
 # -- the decision -------------------------------------------------------------------------
 
-def test_mode_resolution_flag_then_toml_then_auto():
-    assert gr.resolve_mode(None, {}) == ("auto", "default")
-    assert gr.resolve_mode(None, {"loop": {"ref_from_goal": "off"}})[0] == "off"
-    assert gr.resolve_mode("always", {"loop": {"ref_from_goal": "off"}}) == ("always", "--ref-from-goal")
-    assert gr.resolve_mode(None, {"loop": {"ref_from_goal": False}})[0] == "off"
-    with pytest.raises(gr.GoalRefError):
-        gr.resolve_mode(None, {"loop": {"ref_from_goal": "sometimes"}})
+def test_mode_resolution_toml_then_auto():
+    assert gr.resolve_mode({}) == ("auto", "default")
+    assert gr.resolve_mode({"loop": {"ref_from_goal": "off"}}) == ("off", "[loop] ref_from_goal")
+    assert gr.resolve_mode({"loop": {"ref_from_goal": False}})[0] == "off"
+    for bad in ("sometimes", "always"):
+        with pytest.raises(gr.GoalRefError):
+            gr.resolve_mode({"loop": {"ref_from_goal": bad}})
 
 
 @pytest.mark.parametrize("mode,oracle_mode,oracle,milestone,action", [
@@ -150,20 +150,12 @@ def test_mode_resolution_flag_then_toml_then_auto():
     ("auto", "source", ["/x/oracle.py"], False, "off"),
     ("auto", "source", [], True, "off"),
     ("auto", "blackbox", [], False, "off"),
-    ("auto", "none", [], False, "off"),
     ("off", "source", [], False, "off"),
-    ("always", "source", ["/x/oracle.py"], True, "generate"),
 ])
 def test_when_a_reference_is_generated(tmp_path, mode, oracle_mode, oracle, milestone, action):
     p = gr.plan(tmp_path, mode=mode, oracle_mode=oracle_mode, oracle_paths=oracle,
                 milestone_valid=milestone)
     assert p.action == action, p.why
-
-
-def test_always_on_a_blackbox_run_is_refused(tmp_path):
-    with pytest.raises(gr.GoalRefError, match="always"):
-        gr.plan(tmp_path, mode="always", oracle_mode="blackbox", oracle_paths=[],
-                milestone_valid=False)
 
 
 def test_state_on_disk_decides_reuse_resume_or_refusal(tmp_path):
@@ -415,8 +407,7 @@ def test_the_student_never_reads_a_generated_reference(tmp_path):
 
 
 def test_a_declared_oracle_stays_denied_when_the_generated_one_replaces_it():
-    """"always" (or a reuse) drops the declared oracle from --oracle and from cfg; the
-    student's deny list keeps it."""
+    """A reuse drops the declared oracle from cfg; the student's deny list keeps it."""
     from forgekernel.loop.cli import _student_denied_oracle
     declared = ["/refs/real/kernel.py"]
     generated = {"loop": {"oracle": ["/run/goal_ref/reference/kernel.py"]}}
@@ -438,17 +429,12 @@ def test_a_previous_runs_generated_reference_is_contamination(tmp_path):
     assert any("ref_from_goal" in f for f in found)
 
 
-def test_the_session_needs_a_goal_capable_agent_command(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-    from forgekernel.loop.cli import _goal_ref_agent_problem
-    monkeypatch.chdir(tmp_path)
-    assert "no --agent-cmd" in _goal_ref_agent_problem(
-        SimpleNamespace(agent_cmd=None, teacher_agent_cmd=None))
-    assert "goal-capable" in _goal_ref_agent_problem(
-        SimpleNamespace(agent_cmd="claude -p --model x", teacher_agent_cmd=None))
-    script = Path(gr.__file__).resolve().parents[3] / "scripts" / "agent-claude.sh"
-    assert _goal_ref_agent_problem(SimpleNamespace(
-        agent_cmd="claude -p", teacher_agent_cmd=f"bash {script} m")) is None
+def test_the_agent_script_that_serves_the_session_exists():
+    """The /goal session is served by scripts/agent-claude.sh handing the turn to
+    scripts/claude-goal.py (FK_AGENT_DRIVER=goal); `forge run` always builds that command."""
+    scripts = Path(gr.__file__).resolve().parents[3] / "scripts"
+    assert (scripts / "agent-claude.sh").is_file() and (scripts / "claude-goal.py").is_file()
+    assert "claude-goal" in (scripts / "agent-claude.sh").read_text(encoding="utf-8")
 
 
 def test_an_orphaned_leg_is_ended_only_when_it_is_ours(tmp_path):
@@ -492,7 +478,7 @@ def test_the_target_anchors_the_fastest_known_reference(loop, target, vs, declar
            "reference": ["/x/kernel.py"], "candidate": 2, "jobs": ["1", "2"], "runs": 2,
            "basis": "cupti_kernel_span", "n_workloads": 1, "workloads": []}
     cfg = {"loop": dict(loop, arch_ref_name="T_b", arch_ref_workloads=["wl0"])}
-    d = gr.arch_decision(cfg, target, acc, gr.Settings())
+    d = gr.arch_decision(cfg, target, acc)
     assert d["declare"] is declare, d["why"]
     out, d2 = gr.apply(cfg, {"accepted": acc}, target_ms=target)
     assert d2 == d and out["loop"]["oracle"] == ["/x/kernel.py"]
@@ -502,4 +488,3 @@ def test_the_target_anchors_the_fastest_known_reference(loop, target, vs, declar
         assert "goal-generated" in out["loop"]["arch_ref_name"]
     else:
         assert out["loop"].get("arch_ref_device_ms") == loop.get("arch_ref_device_ms")
-    assert gr.arch_decision(cfg, target, acc, gr.Settings(as_target=False))["declare"] is False

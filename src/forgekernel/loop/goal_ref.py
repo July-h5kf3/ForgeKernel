@@ -12,13 +12,12 @@ version, and that version becomes the run's oracle (source mode). From there the
 unchanged: the teacher distils milestone v1 from it, the student starts from the card's
 stub as in every source-mode run.
 
-When it runs (``[loop] ref_from_goal`` / ``--ref-from-goal``):
+When it runs (``[loop] ref_from_goal``, written by ``forge run`` from the task):
 
   auto    (default) oracle_mode is "source", no oracle is declared, and no valid
-          milestone is on disk. A blackbox run has its sealed reference, oracle_mode
-          "none" asked not to distil, and a milestone on disk is the run's input.
-  always  every source-mode run, a declared oracle notwithstanding (it is ignored).
-  off     never; the run behaves as before this module existed.
+          milestone is on disk. A blackbox run has its sealed reference, and a
+          milestone on disk is the run's input.
+  off     never (a task with a reference, a leaderboard card).
 
 Whatever the setting, a reference this operator directory already generated is reused
 (``goal_ref/state.json`` status "accepted"), a generation the loop was interrupted in is
@@ -43,13 +42,13 @@ precision gate merged, its contract did not fail it) and its source calls no ker
 library for the computation (``library_findings``: a reference that is a flashinfer call
 has nothing to distil). The speed bar (``resolve_bar``) is the first of: --target-ms, the
 architecture reference the card declares (a SOL card's T_b), the in-job reference the
-bench times beside the kernel (same-job ratio >= ``ref_from_goal_ratio``), an archived
+bench times beside the kernel (same-job ratio >= ``DEFAULT_RATIO``), an archived
 library baseline; with none of them there is no bar and the session runs to its
 deadline. The session ends at the bar or at the deadline (``ref_from_goal_hours`` after
 it started, absolute: a resumed session does not get a fresh budget), plus
 ``Generation.report_s`` past the deadline to write its report and run the check; then
 the eligible candidates are re-measured by the loop, fastest
-first, ``ref_from_goal_accept_runs`` times each, and the first that stays correct in every
+first, ``ACCEPT_RUNS`` times each, and the first that stays correct in every
 run is the reference. No eligible candidate — or none that survives — fails the launch
 (EXIT_GOAL_REF_FAILED); a wrong kernel is never made an oracle.
 
@@ -87,13 +86,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from forgekernel.paths import operators_dir
+from forgekernel.paths import operators_dir, repo_root
 
-MODES = ("auto", "always", "off")
+MODES = ("auto", "off")
 DEFAULT_MODE = "auto"
 DEFAULT_HOURS = 2.0
+# The speed bar's ratio over an in-job reference, and how many acceptance runs a
+# candidate must stay correct in: fixed (docs/design/v1-launch.md Appendix A.2).
 DEFAULT_RATIO = 1.0
-DEFAULT_ACCEPT_RUNS = 2
+ACCEPT_RUNS = 2
 # How many eligible candidates the acceptance tries before it gives up.
 ACCEPT_CANDIDATES = 3
 # Agent invocations per generation: one that ends early (usage limit, crash) is started
@@ -144,43 +145,33 @@ class GoalRefError(RuntimeError):
 
 # -- configuration ------------------------------------------------------------------------
 
-def resolve_mode(flag: str | None, cfg: dict) -> tuple[str, str]:
-    """(mode, where it came from): --ref-from-goal, then [loop] ref_from_goal, then auto."""
-    for value, source in ((flag, "--ref-from-goal"),
-                          ((cfg.get("loop") or {}).get("ref_from_goal"), "[loop] ref_from_goal")):
-        if value is None or value == "":
-            continue
-        if isinstance(value, bool):          # `ref_from_goal = false` reads as off
-            value = "auto" if value else "off"
-        value = str(value).strip().lower()
-        if value not in MODES:
-            raise GoalRefError(f"{source} must be one of {list(MODES)}, got {value!r}")
-        return value, source
-    return DEFAULT_MODE, "default"
+def resolve_mode(cfg: dict) -> tuple[str, str]:
+    """(mode, where it came from): [loop] ref_from_goal, else auto."""
+    value = (cfg.get("loop") or {}).get("ref_from_goal")
+    if value is None or value == "":
+        return DEFAULT_MODE, "default"
+    if isinstance(value, bool):          # `ref_from_goal = false` reads as off
+        value = "auto" if value else "off"
+    value = str(value).strip().lower()
+    if value not in MODES:
+        raise GoalRefError(f"[loop] ref_from_goal must be one of {list(MODES)}, got {value!r}")
+    return value, "[loop] ref_from_goal"
 
 
 @dataclass(frozen=True)
 class Settings:
     hours: float = DEFAULT_HOURS
-    ratio: float = DEFAULT_RATIO
-    accept_runs: int = DEFAULT_ACCEPT_RUNS
-    as_target: bool = True
 
 
-def settings(cfg: dict, hours_flag: float | None = None) -> Settings:
+def settings(cfg: dict) -> Settings:
     lc = cfg.get("loop") or {}
     try:
-        hours = float(hours_flag if hours_flag is not None
-                      else lc.get("ref_from_goal_hours", DEFAULT_HOURS))
-        ratio = float(lc.get("ref_from_goal_ratio", DEFAULT_RATIO))
-        runs = int(lc.get("ref_from_goal_accept_runs", DEFAULT_ACCEPT_RUNS))
+        hours = float(lc.get("ref_from_goal_hours", DEFAULT_HOURS))
     except (TypeError, ValueError) as e:
-        raise GoalRefError(f"[loop] ref_from_goal_* settings: {e}") from None
-    if hours <= 0 or ratio <= 0 or runs < 1:
-        raise GoalRefError("[loop] ref_from_goal_hours / _ratio must be > 0 and "
-                           "ref_from_goal_accept_runs >= 1")
-    return Settings(hours=hours, ratio=ratio, accept_runs=runs,
-                    as_target=bool(lc.get("ref_from_goal_as_target", True)))
+        raise GoalRefError(f"[loop] ref_from_goal_hours: {e}") from None
+    if hours <= 0:
+        raise GoalRefError("[loop] ref_from_goal_hours must be > 0")
+    return Settings(hours=hours)
 
 
 # -- paths & state ------------------------------------------------------------------------
@@ -283,9 +274,8 @@ class Plan:
 
 def plan(op_dir: Path, *, mode: str, oracle_mode: str, oracle_paths: list[str],
          milestone_valid: bool) -> Plan:
-    """What this launch does about a missing reference. Raises GoalRefError when the
-    setting cannot be honoured (always on a non-source run) or a previous generation in
-    this operator directory failed."""
+    """What this launch does about a missing reference. Raises GoalRefError when a
+    previous generation in this operator directory failed."""
     if mode == "off":
         return Plan("off", "ref_from_goal = off", mode)
     state = load_state(op_dir)
@@ -307,15 +297,7 @@ def plan(op_dir: Path, *, mode: str, oracle_mode: str, oracle_paths: list[str],
                            f"(or its reference files are missing) — remove "
                            f"{Paths.of(op_dir).root} to start over")
     if oracle_mode != "source":
-        if mode == "always":
-            raise GoalRefError(f"ref_from_goal = \"always\" needs oracle_mode \"source\" "
-                               f"(this run is {oracle_mode!r})")
         return Plan("off", f"oracle_mode = {oracle_mode} (not a missing reference)", mode)
-    if mode == "always":
-        why = "ref_from_goal = always"
-        if oracle_paths:
-            why += f" (the declared oracle {', '.join(oracle_paths)} is ignored)"
-        return Plan("generate", why, mode)
     if oracle_paths:
         return Plan("off", "an oracle is declared", mode)
     if milestone_valid:
@@ -830,13 +812,9 @@ def _brief(rec: dict) -> str:
 
 # -- the agent-side commands --------------------------------------------------------------
 
-def _src_dir() -> Path:
-    return Path(__file__).resolve().parents[2]
-
-
 def command(*args: str, python: str | None = None) -> str:
     """A shell command running this module with THIS checkout's package."""
-    return ("PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=" + shlex.quote(str(_src_dir())) + " "
+    return ("PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=" + shlex.quote(str(repo_root() / "src")) + " "
             + " ".join(shlex.quote(x) for x in (python or sys.executable, "-W",
                                                  "ignore::RuntimeWarning", "-m",
                                                  "forgekernel.loop.goal_ref", *args)))
@@ -1141,7 +1119,7 @@ def generate(g: Generation, resume: dict | None = None) -> dict:
                  "gate_window": g.gate_window, "started": started,
                  "deadline": started + g.settings.hours * 3600, "budget_h": g.settings.hours,
                  "bar": resolve_bar(g.cfg, g.op_dir, target_ms=g.target_ms,
-                                    ratio=g.settings.ratio, gate_window=g.gate_window),
+                                    ratio=DEFAULT_RATIO, gate_window=g.gate_window),
                  "tree": str(tree), "ws": str(ws), "reply": str(reply),
                  "agent_cmd": g.agent_cmd, "attempts": []}
     else:
@@ -1354,9 +1332,9 @@ def accept(g: Generation, state: dict, svc: Service) -> dict:
                           "error": "the kernel file changed since it was evaluated"})
             continue
         g.log(f"acceptance: candidate {cand['n']:03d} ({cand['reading_ms']:.6g} ms in the "
-              f"session), {g.settings.accept_runs} run(s)")
+              f"session), {ACCEPT_RUNS} run(s)")
         runs, ok = [], True
-        for k in range(1, g.settings.accept_runs + 1):
+        for k in range(1, ACCEPT_RUNS + 1):
             branch = f"accept-{cand['n']:03d}-{k}"
             kernel = Path(cand["kernel"])
             svc._commit(branch, kernel, None, f"goal-ref acceptance {cand['n']:03d} run {k}")
@@ -1469,8 +1447,7 @@ def ensure_reference_tree(root: Path, op: str, op_dir: Path, state: dict) -> Pat
     return tree
 
 
-def arch_decision(cfg: dict, target_ms: float | None, accepted: dict,
-                  st: Settings) -> dict:
+def arch_decision(cfg: dict, target_ms: float | None, accepted: dict) -> dict:
     """Whether the accepted reading becomes the architecture reference (the target).
 
     The target anchors to what the run reproduces — the oracle — unless something
@@ -1483,8 +1460,6 @@ def arch_decision(cfg: dict, target_ms: float | None, accepted: dict,
     (arch_ref_mode: a real implementation timed through its own tree) and --target-ms
     are never overridden."""
     lc = cfg.get("loop") or {}
-    if not st.as_target:
-        return {"declare": False, "why": "ref_from_goal_as_target = false"}
     if target_ms:
         return {"declare": False, "why": "--target-ms given"}
     if lc.get("arch_ref_mode"):
@@ -1512,8 +1487,7 @@ def arch_decision(cfg: dict, target_ms: float | None, accepted: dict,
                                     f"anchors the target"}
 
 
-def apply(cfg: dict, state: dict, *, target_ms: float | None = None,
-          st: Settings | None = None) -> tuple[dict, dict]:
+def apply(cfg: dict, state: dict, *, target_ms: float | None = None) -> tuple[dict, dict]:
     """(``cfg`` with the accepted reference wired in as the oracle — and, when
     ``arch_decision`` says so for THIS launch's loop.toml and flags, as the architecture
     reference —, the decision). A deep copy; loop.toml on disk is never rewritten."""
@@ -1521,7 +1495,7 @@ def apply(cfg: dict, state: dict, *, target_ms: float | None = None,
     out = copy.deepcopy(cfg)
     lc = out.setdefault("loop", {})
     acc = state.get("accepted") or {}
-    arch = arch_decision(cfg, target_ms, acc, st or settings(cfg))
+    arch = arch_decision(cfg, target_ms, acc)
     lc["oracle_mode"] = "source"
     lc["oracle"] = list(acc.get("reference") or [])
     lc.setdefault("kb_lint_oracle_tokens", False)

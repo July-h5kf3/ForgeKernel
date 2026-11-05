@@ -356,17 +356,6 @@ def test_the_agent_scripts_pass_the_agent_policys_command_scan():
     assert command_findings([f"python3 {_ROOT / 'scripts' / 'claude-goal.py'} m m"], {}) == []
 
 
-def test_goal_leg_findings():
-    sys.path.insert(0, str(_ROOT / "src"))
-    from forgekernel.loop.cli import goal_leg_findings
-    scripts = _ROOT / "scripts"
-    assert goal_leg_findings([f"bash {scripts / 'agent-claude.sh'} m high 600"], {}) == []
-    assert goal_leg_findings([f"python3 {scripts / 'claude-goal.py'} m m"], {}) == []
-    # a plain claude -p command
-    f = goal_leg_findings(["claude -p --model x"], {})
-    assert len(f) == 1 and "claude -p" in f[0]
-
-
 def test_a_limit_after_the_deliverable_is_complete_delivers(env):
     """The usage limit hit after the agent wrote and checked its reply (the judge never got
     to say so): the check is the authority, the turn is delivered, not retried."""

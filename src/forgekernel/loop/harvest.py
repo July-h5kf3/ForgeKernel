@@ -12,7 +12,7 @@ Two guards, both cheap:
 - refuse to start on an unharvested ``hw_kb`` — otherwise a second run stacks
   its recipes on top of the first one's and the pile gets harder to review;
 - report what is left behind when the run ends, with the absolute repo root,
-  since ``_repo_root()`` follows the installed package rather than the cwd and
+  since ``paths.repo_root()`` follows the installed package rather than the cwd and
   the tree that received the recipes is not always the one being watched.
 
 The trajectory files (``status.jsonl`` / ``meta_status.jsonl``) are deliberately

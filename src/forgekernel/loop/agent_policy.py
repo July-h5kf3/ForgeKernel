@@ -86,12 +86,6 @@ KEY_DSL_SOURCE_DIRS = "dsl_source_dirs"
 # an offline CUDA student may read. Falls back to dsl_source_dirs, where older
 # configs declared them.
 KEY_CUDA_SOURCE_DIRS = "cuda_source_dirs"
-KEY_EXTRA_ALLOW_WRITE = "agent_allow_write"
-# A source run whose ref_source_paths / ref_source_urls name OTHER implementations (earlier
-# runs on the operator, sister libraries) rather than the oracle itself: true denies them
-# to the teacher as well, the way a blackbox teacher is denied them. The oracle stays
-# readable as long as no listed path contains it (the run script checks that).
-KEY_SOURCE_TEACHER_DENIES = "source_teacher_denies_ref"
 
 # Shell commands that reach the network, denied by name for an offline role. Tripwires
 # layered UNDER the sandbox, which is what actually refuses the connection: a deny rule
@@ -129,7 +123,6 @@ class AgentPolicy:
     student must not read (reconnaissance / reference-pricing trees, a source run's
     oracle and the directory it sits in). ``repo_root``: the run's repository, which the
     teacher may write (milestones, KB recipes) and the student may not.
-    ``extra_allow_write``: anything else Bash may write, for both roles.
     ``secret_files``: the gitignored ``submit.local.toml`` of the operator card and of
     every teacher tree — the file a closed single-file reference's key rides in
     (``src/forgekernel/card_template/eval/closed_ref.py``). It sits INSIDE the run's tree,
@@ -139,7 +132,6 @@ class AgentPolicy:
 
     oracle_mode: str
     repo_root: Path
-    extra_allow_write: tuple[Path, ...] = ()
     ref_source_paths: tuple[Path, ...] = ()
     ref_source_urls: tuple[str, ...] = ()
     teacher_trees: tuple[Path, ...] = ()
@@ -148,7 +140,6 @@ class AgentPolicy:
     # The run's loop language: a CUDA-mode run's notice names CUDA / CUTLASS headers
     # where a CuTe DSL run's names the DSL package source (lang_mode).
     language: str = "cutedsl"
-    source_teacher_denies: bool = False
     # The student's deny list with the network on: the ref_from_goal session
     # (loop/goal_ref.py), which writes a reference from scratch and may look things up.
     # The GPU-machine CLIs stay off — its GPU channel is the loop's ledgered eval command.
@@ -160,7 +151,7 @@ class AgentPolicy:
     hook_python: str = field(default_factory=lambda: sys.executable)
 
     def _teacher_denied(self) -> bool:
-        return self.oracle_mode == ORACLE_BLACKBOX or self.source_teacher_denies
+        return self.oracle_mode == ORACLE_BLACKBOX
 
     # -- what each role is denied ------------------------------------------------------
 
@@ -204,10 +195,7 @@ class AgentPolicy:
         gets nothing extra -- otherwise a student turn could rewrite the prompts, the
         knowledge base, a teacher-only tree it cannot even read, or this policy's hook.
         """
-        extra = list(self.extra_allow_write)
-        if role == ROLE_STUDENT:
-            return extra
-        return list(dict.fromkeys([self.repo_root, *extra]))
+        return [] if role == ROLE_STUDENT else [self.repo_root]
 
     # -- rendering ---------------------------------------------------------------------
 
@@ -299,7 +287,6 @@ class AgentPolicy:
             "offline": self.offline(role),
             "no_cluster": self.no_cluster(role),
             "deny_urls": self.deny_urls(role),
-            "deny_paths": [str(p) for p in self.deny_read(role)],
         }
 
     def notice(self, role: str) -> str:
@@ -354,12 +341,6 @@ class AgentPolicy:
                 "- This is a blackbox run: **looking up the reference implementation's source "
                 "online is forbidden** (including mirror sites, raw / api endpoints and package-manager "
                 "downloads).")
-        elif role != ROLE_STUDENT and self.source_teacher_denies:
-            lines.append(
-                "- Ready-made implementations of the same kind of operator other than the ORACLE "
-                "must not be read at all (locally or online, including mirror sites, raw / api "
-                "endpoints, package-manager downloads, and such packages installed in the GPU image); "
-                "the harness blocks the denied paths and URLs above.")
         return "\n".join(lines) + "\n\n"
 
     # -- installation ------------------------------------------------------------------
@@ -447,23 +428,34 @@ _CD_STMT = re.compile(
     r"(?:^|[;&|\"']|(?<!\$)\(|\bthen\b|\bdo\b|\belse\b)\s*(?:builtin\s+)?(?:cd|pushd)\s",
     re.M)
 _CD_SUBST = re.compile(r"\$\(\s*(?:builtin\s+)?(?:cd|pushd)\s[^\n]*claude", re.M | re.I)
+# A shell script an agent command names (one level deep): its text is scanned too.
+_SCRIPT_TOKEN = re.compile(r"(?<![\w/.-])((?:~|\$HOME|/)?[\w./~$-]*\.(?:sh|bash|zsh))\b")
+
+
+def _expand(value: str, env: dict[str, str]) -> str:
+    """``$NAME`` / ``${NAME}`` / ``~`` expansion against ``env``; unknown names stay."""
+    def sub(m: re.Match) -> str:
+        name = m.group(1) or m.group(2)
+        return env.get(name, m.group(0))
+    out = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)", sub, value)
+    if out.startswith("~"):
+        out = env.get("HOME", os.path.expanduser("~")) + out[1:]
+    return out
 
 
 def command_findings(cmds: list[str | None], env: dict[str, str],
                      cwd: str | os.PathLike | None = None) -> list[str]:
     """Why some agent command would run the agent without loading the project settings.
 
-    Reads what the context-window gate reads (agentctx): the command text and the shell
-    scripts it names (one level). Static, so it cannot see
-    a script that computes its own flags, nor a directory change whose command is only
-    reachable through a variable; the per-turn installation still happens, this only
-    refuses the shapes known to defeat it."""
-    from forgekernel.loop.agentctx import _SCRIPT_TOKEN, _expand
+    Reads the command text and the shell scripts it names (one level). Static, so it
+    cannot see a script that computes its own flags, nor a directory change whose
+    command is only reachable through a variable; the per-turn installation still
+    happens, this only refuses the shapes known to defeat it."""
 
     def scripts_in(text: str) -> list[tuple[str, str]]:
         out = []
         for m in _SCRIPT_TOKEN.finditer(text):
-            path = _expand(m.group(1), {}, env)
+            path = _expand(m.group(1), env)
             if not os.path.isabs(path) and cwd is not None:
                 path = os.path.join(os.fspath(cwd), path)
             if os.path.isfile(path):
@@ -516,8 +508,7 @@ def declaration_problems(cfg: dict, oracle_mode: str) -> list[str]:
     nothing, and "we forgot" must not look the same as "there is nothing to deny"."""
     lc = cfg.get("loop", {})
     problems = []
-    for key in (KEY_REF_SOURCE_PATHS, KEY_REF_SOURCE_URLS, KEY_DSL_SOURCE_DIRS,
-                KEY_EXTRA_ALLOW_WRITE):
+    for key in (KEY_REF_SOURCE_PATHS, KEY_REF_SOURCE_URLS, KEY_DSL_SOURCE_DIRS):
         if key in lc and not (isinstance(lc[key], list)
                               and all(isinstance(x, str) for x in lc[key])):
             problems.append(f"[loop] {key} must be a list of strings, got {lc[key]!r}")
@@ -600,8 +591,6 @@ def from_config(cfg: dict, *, oracle_mode: str, repo_root: Path,
     return AgentPolicy(
         oracle_mode=oracle_mode,
         repo_root=_abs(repo_root),
-        extra_allow_write=tuple(dict.fromkeys(
-            _abs(p) for p in lc.get(KEY_EXTRA_ALLOW_WRITE, []))),
         ref_source_paths=tuple(_abs(p) for p in lc.get(KEY_REF_SOURCE_PATHS, [])),
         ref_source_urls=tuple(u.strip() for u in lc.get(KEY_REF_SOURCE_URLS, []) if u.strip()),
         teacher_trees=tuple(dict.fromkeys(_abs(p) for p in teacher_trees)),
@@ -609,5 +598,4 @@ def from_config(cfg: dict, *, oracle_mode: str, repo_root: Path,
                          else tuple(dict.fromkeys(_abs(p) for p in dsl_source_dirs_default))),
         secret_files=secret_files_for(repo_root, op, teacher_trees),
         language=language,
-        source_teacher_denies=bool(lc.get(KEY_SOURCE_TEACHER_DENIES, False)),
     )
