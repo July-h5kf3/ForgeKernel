@@ -2555,7 +2555,7 @@ def run_leaderboard_bench(argv=None, problem_path=None) -> int:
         return _ref_alone(problem, ref_fn, ref_dps, device)
     if args.mode == "ref":
         # [loop] ref_cmd: the in-job reference alone on the suite's clock, for
-        # `forge <op> baseline`. One flat block — nested per-set blocks with an ms
+        # the loop's reference measurement. One flat block — nested per-set blocks with an ms
         # key would be read as rival backends by the archive's fastest-block rule.
         _, sets = _correctness(dict(problem, _no_precision=True), ref_fn, ref_dps, device)
         m = measure(problem, sets, ref_fn, ref_dps, device=device)

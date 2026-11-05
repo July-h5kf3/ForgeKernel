@@ -104,13 +104,14 @@ def test_declared_contract_parses_and_is_consistent(tmp_path):
 def test_absent_file_is_none_and_a_named_finding(tmp_path):
     assert load_window_contract(tmp_path) is None
     (finding,) = window_findings(None)
-    assert WINDOW_FILENAME in finding and "card_template" in finding
+    assert WINDOW_FILENAME in finding and "forge run" in finding
 
 
-def test_template_placeholder_is_undeclared_not_malformed():
-    """The scaffolded file parses but is UNDECLARED: a fresh card must refuse
-    until the author fills it in — vacuous consistency would defeat the gate."""
-    text = (REPO / "src" / "forgekernel" / "card_template" / WINDOW_FILENAME).read_text(encoding="utf-8")
+def test_an_empty_contract_is_undeclared_not_malformed():
+    """Empty lists parse but are UNDECLARED: a fresh card must refuse until the
+    boundaries are declared — vacuous consistency would defeat the gate."""
+    text = ('schema_version = 1\n[reference]\nwindow = ""\ninputs = []\noutputs = []\n'
+            '[student]\nwindow = ""\ninputs = []\noutputs = []\n')
     c = parse_window_contract(text)
     assert not c.declared
     findings = window_findings(c)
@@ -491,38 +492,6 @@ def test_loop_start_exit_code_is_reserved():
     assert EXIT_WINDOW_UNDECLARED == 13
 
 
-def test_dry_run_line_names_the_state():
-    from forgekernel.loop.cli import _window_dry_run_line
-    c = parse_window_contract(DECLARED)
-    assert _window_dry_run_line("ok", c, [], False) == "declared (2 asymmetries, 1 priced)"
-    assert "refuse" in _window_dry_run_line("refuse", None, ["x"], False)
-    assert "admitted" in _window_dry_run_line("refuse", None, ["x"], True)
-    assert "resuming" in _window_dry_run_line("warn", None, ["x"], False)
-    assert _window_dry_run_line("n/a", None, [], False).startswith("n/a")
-
-
-# --- forge <op> window ----------------------------------------------------------
-
-def test_window_cli_reports_findings_and_renders_the_ledger(tmp_path, capsys):
-    from forgekernel.window_contract import main
-    op_dir = tmp_path / "operators" / "demo"
-    _write(op_dir)
-    save_baseline(op_dir, RefBaseline(op="demo", ms=1.0, ms_device=0.68, role=ROLE_ARCHITECTURE,
-                                      kernels=_REF_KERNELS))
-    (op_dir / "student").mkdir()
-    append_record(op_dir / "student" / "status.jsonl",
-                  IterationRecord(iter=3, decision_id="D0.3", change="x", correctness=True,
-                                  verdict="KEEP", device_median_ms=0.8, kernels=_KERNELS))
-    assert main(["demo", "--base-dir", str(tmp_path)]) == 0
-    out = capsys.readouterr().out
-    assert "fused_bwd" in out and "best KEEP iter 3" in out
-    assert "tax-credited ratio" in out
-
-    _write(op_dir, _BOTH)
-    assert main(["demo", "--base-dir", str(tmp_path)]) == 1
-    assert "[[asymmetry]]" in capsys.readouterr().out
-
-
 # --- driver: binding, student note, confirmation credit ------------------------
 
 def _driver_ctx(tmp_path, contract):
@@ -835,7 +804,7 @@ def test_bench_prep_findings_reads_bench_then_ncu_run(tmp_path):
 
 
 def test_preflight_refuses_a_symmetrized_card_whose_bench_runs_no_prep(tmp_path):
-    from forgekernel.loop.cli import _window_dry_run_line, _window_preflight
+    from forgekernel.loop.cli import _window_preflight
     _write(tmp_path, SYMMETRIZED)
     (tmp_path / "eval").mkdir()
     (tmp_path / "eval" / "bench.py").write_text("win = measure_windows(_run)\n", encoding="utf-8")
@@ -845,7 +814,7 @@ def test_preflight_refuses_a_symmetrized_card_whose_bench_runs_no_prep(tmp_path)
     (tmp_path / "eval" / "ncu_run.py").write_text(NCU_OK, encoding="utf-8")
     state, contract, problems = _window_preflight(tmp_path, _cfg_with_ref(), resuming=False)
     assert state == "ok" and problems == []
-    assert "2 prep-produced" in _window_dry_run_line("ok", contract, [], False)
+    assert len(contract.prep_entries) == 2
 
 
 def test_parse_eval_reads_the_prep_block():
