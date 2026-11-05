@@ -1,28 +1,21 @@
-"""``forge <op> baseline`` — measure the ref once, archive it, and stop.
+"""Measure the reference once and archive it (``forgekernel.baseline.RefBaseline``).
 
-Split out of the loop on purpose. A baseline is a property of (operator, shape,
-hardware), not of a run: re-running a task should not re-measure the same cuDNN
-number, and two runs of one operator must compare against the identical baseline
-or their results are not comparable.
+A baseline is a property of (operator, shape, hardware), not of a run: the loop measures
+it once at its start (``measure_and_archive``) and every gate of the run anchors to that
+archive; the finish re-measures the reference without archiving (``measure_ref_fresh``)
+so node drift over the run's hours is read as drift, not as kernel change.
 
-    forge <op> baseline --ref-cmd "python bench_ref.py" --ref-name cuDNN
-    forge <op> baseline --show
-    forge <op> baseline --from-json ref.json     # already measured elsewhere
-
-The measurement itself is whatever the operator's bench script prints; this module
-only locates the numbers and files them. It runs no GPU work of its own — it submits
-the ref command through the same harness the loop uses.
+The measurement itself is whatever the tree's bench prints; this module only locates
+the numbers and files them. It runs no GPU work of its own — it submits the ref task
+through the same harness the loop uses.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
-import sys
 from pathlib import Path
 
-from forgekernel.paths import operators_dir
 from forgekernel.baseline import (
     BASIS_PLAIN,
     HOST_FREE_BASES,
@@ -343,12 +336,11 @@ class RefMeasurementError(RuntimeError):
 
 def measure_and_archive(op: str, op_dir: Path, spec: dict, *,
                         repeat: int = 3, role: str = ROLE_LIBRARY) -> RefBaseline:
-    """Measure the ref per ``spec`` and archive it. Shared by the subcommand and the loop.
+    """Measure the ref per ``spec`` and archive it.
 
     ``spec`` carries the operator facts — ``ref_cmd``, optional ``ref_ncu_cmd``, and
     the labels. Everything about *how* to measure (repeats, keeping the fastest,
-    retrying a lost job, parsing) lives here, so the loop measuring a baseline
-    itself and a human running ``forge <op> baseline`` get identical behaviour.
+    retrying a lost job, parsing) lives here.
 
     ``role`` selects which reference is being measured, and the two differ in how they
     are invoked. The library baseline is a command (``ref_cmd``) run through the
@@ -418,93 +410,3 @@ def measure_ref_fresh(op: str, spec: dict, *, repeat: int = 3) -> list[dict]:
     _, _, _, _, parsed_runs = _measure(
         op, perf_mode, None, repeat=max(1, repeat), submit_op=spec.get("submit_op"))
     return parsed_runs
-
-
-def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(
-        prog="forge <op> baseline",
-        description="Measure the reference implementation once and archive it.")
-    p.add_argument("op")
-    p.add_argument("--ref-cmd", help="bench command run on the GPU (prints ms/TFLOPs/MFU)")
-    p.add_argument("--ncu-cmd", help="optional NCU pass; stdout must be NCU CSV")
-    p.add_argument("--repeat", type=int, default=3,
-                   help="measure the ref this many times and keep the fastest (default 3); "
-                        "node contention has been seen to inflate a single sample by 19%%")
-    p.add_argument("--ref-name", default="", help='e.g. "cuDNN", "flash-attn cute"')
-    p.add_argument("--shape", default="", help="the fixed benchmark shape, free-form")
-    p.add_argument("--hardware", default="", help="e.g. H100")
-    p.add_argument("--from-json", help="file with {ms, tflops?, mfu?, ncu?} measured "
-                                       "elsewhere — archives without submitting a job")
-    p.add_argument("--job", default="", help="provenance for --from-json")
-    p.add_argument("--show", action="store_true", help="print the archived baseline")
-    p.add_argument("--force", action="store_true", help="overwrite an existing archive")
-    args = p.parse_args(argv)
-
-    op_dir = operators_dir() / args.op
-    if not op_dir.is_dir():
-        sys.stderr.write(f"[baseline] error: no operator dir at {op_dir}\n")
-        return 2
-
-    if args.show:
-        existing = load_baseline(op_dir)
-        if not existing:
-            print(f"[baseline] {args.op}: not measured yet")
-            return 1
-        print(existing.render())
-        return 0
-
-    existing = load_baseline(op_dir)
-    if existing and not args.force:
-        sys.stderr.write(
-            f"[baseline] error: {args.op} already has a baseline ({existing.ms} ms, job "
-            f"{existing.job or '?'}). Re-measuring changes every gate anchored to it — "
-            f"pass --force if that is what you want.\n")
-        return 3
-
-    if args.from_json:
-        data = json.loads(Path(args.from_json).read_text(encoding="utf-8"))
-        if "ms" not in data:
-            sys.stderr.write("[baseline] error: --from-json needs an 'ms' key\n")
-            return 4
-        baseline = RefBaseline(
-            op=args.op, ms=data["ms"], job=args.job, shape=args.shape,
-            hardware=args.hardware, ref_name=args.ref_name,
-            tflops=data.get("tflops"), mfu=data.get("mfu"),
-            # measured elsewhere still has to carry the device reading and its
-            # provenance, or a --from-json archive silently cannot be device-gated
-            # and its window basis is unrecoverable.
-            ms_device=data.get("ms_device"),
-            device_window_basis=_archived_basis(data),
-            ms_device_plain=data.get("ms_device_plain"),
-            ms_device_graph=data.get("ms_device_graph"),
-            host_enqueue_ms=data.get("host_enqueue_ms"),
-            host_bound_ratio=data.get("host_bound_ratio"),
-            n_workloads=int(data.get("n_workloads") or 1),
-            workloads=[str(w.get("name")) if isinstance(w, dict) else str(w)
-                       for w in data.get("workloads") or []],
-            ncu=data.get("ncu", {}), samples_ms=data.get("samples_ms", []),
-        )
-        path = save_baseline(op_dir, baseline)
-        print(f"[baseline] archived -> {path}")
-        print(baseline.render())
-        _report_host_bound(baseline)
-        return 0
-
-    if not args.ref_cmd:
-        sys.stderr.write("[baseline] error: need --ref-cmd, --from-json or --show\n")
-        return 2
-
-    try:
-        measure_and_archive(args.op, op_dir, {
-            "ref_cmd": args.ref_cmd, "ref_ncu_cmd": args.ncu_cmd,
-            "ref_name": args.ref_name, "ref_shape": args.shape,
-            "ref_hardware": args.hardware,
-        }, repeat=max(1, args.repeat))
-    except RefMeasurementError as e:
-        sys.stderr.write(f"[baseline] error: {e}\n")
-        return 4
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

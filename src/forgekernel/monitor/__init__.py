@@ -17,8 +17,8 @@ Nothing on the card changes: the runtime rides into the job as an overlay commit
 recorded in ``operators/<op>/correctness_monitor.jsonl`` and the confirmation
 record, never fed to an agent and never turned into a KEEP / REVERT.
 
-Entry points: ``forge <op> monitor`` (any sha, on demand) and the loop's finish
-(``[loop] correctness_monitor``, default ``"best"``: the confirmed best sha).
+Entry point: the loop's finish (``loop.cli._run_finish_monitor``) on the confirmed best
+sha, else the best green KEEP.
 """
 
 from __future__ import annotations
