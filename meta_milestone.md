@@ -275,7 +275,7 @@ skipping**. The decisions inside one milestone need not be serial, as long as th
   max_diff of many consecutive correctness FAILs was bit-identical, and even with every component
   probe PASSing the fault could not be located. This item does not apply to single-kernel operators.
 - **The ref baseline is not a milestone** (template A.4): it is measured **before** distillation
-  (`forge <op> baseline`, archived as `operators/<op>/ref_baseline.json`) and injected into the
+  (by the loop at its start, archived as `operators/<op>/arch_baseline.json`) and injected into the
   distill prompt as an authoring input. For how the gate numbers are anchored, see the next item.
   The phase order therefore goes straight from M0 to M1.
 - **Two references, split anchoring (template A.4)**: `arch_baseline.json` = **architecture

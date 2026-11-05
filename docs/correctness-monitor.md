@@ -69,23 +69,12 @@ target only if the monitor raised no alarm on that kernel (this decides `forge r
 
 ## How to run it
 
-**Automatically at the finish**: after the confirmation step, `forge run` runs one monitor job on the
-confirmed sha (or, without a confirmation, on the best green KEEP) with all default profiles; this is
-not configurable. When the loop is run directly on a hand-made tree (`forge <op> loop`), `[loop]
-correctness_monitor` in its `loop.toml` (default `"best"`; `"off"` turns it off) and `[loop]
-correctness_monitor_profiles` (the profile list) control this step.
-
-**On any sha, at any time**:
-
-```bash
-# a run's trees: first point forge at the run's operators/
-export FORGEKERNEL_OPERATORS_DIR=.artifacts/<op>_<id>/operators
-forge <op> monitor --workspace .artifacts/<op>_<id>/ws            # default: the sha in best_confirmation.json, else the workspace HEAD
-forge <op> monitor --workspace .artifacts/<op>_<id>/ws --sha ae8f882 --profiles base,seed1,zero_block
-forge <op> monitor --workspace .artifacts/<op>_<id>/ws --dry-run  # print the overlaid tree, branch and job command only
-```
-
-Exit codes: 0 ok, 1 warn, 2 alarm, 3 could not run.
+**At the finish of every run**: after the confirmation step, `forge run` runs one monitor job on the
+confirmed sha (or, without a confirmation, on the best green KEEP) with all default profiles
+(`forgekernel.monitor.DEFAULT_PROFILES`); this is not configurable. The result lands in the
+confirmation record (`best_confirmation.json` → `correctness_monitor`) and in
+`correctness_monitor.jsonl`; an alarm on the confirmed kernel makes `forge run` exit 2 even when
+the loop stopped on its target.
 
 ## Mechanism
 

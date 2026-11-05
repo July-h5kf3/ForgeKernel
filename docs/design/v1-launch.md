@@ -416,7 +416,7 @@ harness's job (§3.4), not the script's.
 
 | Module | Before | Now |
 |---|---|---|
-| `scaffold.py` / `forge init` | built a standalone git repository under `operators/<op>/` with copies of the eval template, the job entry and the prompts | `forge init` creates the three template files of `tasks/<op>/`; eval, entry and prompts belong to the harness (`taskcard.py` generates the operator trees inside the run directory); scaffold remains for leaderboard problems and hand-made trees |
+| `scaffold.py` / `forge init` | built a standalone git repository under `operators/<op>/` with copies of the eval template, the job entry and the prompts | `forge init` creates the three template files of `tasks/<op>/`; eval, entry and prompts belong to the harness (`taskcard.py` generates the operator trees inside the run directory); `scaffold.py` remains as the leaderboard card generator only (§15) |
 | `loop/cli.py` | 43 arguments + about 50 `loop.toml` keys, filled in by the user | `forge run` reads `task.toml`, creates the run directory, generates `loop.toml` and calls the loop with fixed arguments |
 | `baseline.py` / `baseline_cli.py` | two references, measured once and cached forever in the operator repository | one reference, measured on every run, stored in the run directory |
 | `loop/goal_ref.py` | three settings: auto / always / off | only auto for ordinary tasks; its products land in the run directory |
@@ -425,7 +425,7 @@ harness's job (§3.4), not the script's.
 | `loop/agent_policy.py` | read the deny list from hand-written `ref_source_paths` etc. | derived automatically + `[reference].deny` |
 | `submit/` | job submission to an internal cluster | two executors, `local` and `ssh`, + the GPU lock |
 | agent access | raw command strings | an adapter that builds the command from `backend` / `provider` (`agents.py`, `scripts/agent-claude.sh`) |
-| `resume/`, resuming | assumed "the operator repository is one git repository" | relies on the run directory |
+| resuming (`launch.py`, `loop/cli.py`) | assumed "the operator repository is one git repository" | relies on the run directory (`run.json` flags, the loop's own records). `resume/` itself is the milestone-DAG checkpoint invalidation of prefix reuse and is unchanged |
 | `loop/driver.py` | refused to start without NCU signatures | degrades when NCU is unavailable (§3.4); otherwise largely unchanged, only where the `LoopContext` fields come from changed |
 | KB publishing | certified entries published automatically | removed; new entries are only listed in the report and the terminal |
 | composite operators | supported | out of V1 |
@@ -508,10 +508,39 @@ Trade-offs made in implementation, and where the result departs from the text ab
 
 ---
 
+## 15. Simplification record (branch `simplify-harness`)
+
+The code behind the settings §12 and Appendix A declare gone was still in the tree; this pass
+removed it, so that the surface and the code agree:
+
+| Removed | Was |
+|---|---|
+| `forge init <op> --kernel-file ...` and `scaffold.new_operator` | the pre-V1 standalone operator repository; `scaffold.py` is now the leaderboard card generator only, and `taskcard.copy_template` copies the four template files every tree starts from |
+| `card_template/window.toml`, `card_template/submit.toml`, the `agent/*.md` prompt copies | overwritten by the generator before any job (window.toml, submit.toml) or read by nothing (agent/); the old 660-line card README that documented them is replaced by a description of a generated tree |
+| `forge <op> baseline`, `forge <op> window`, `forge <op> monitor`, `forge <op> leaderboard show\|export`, the `forge <op> submit\|status\|logs\|stop` fall-through | human-only wrappers around functions the loop calls directly; `forge export` and `python -m forgekernel.submit` remain |
+| 29 of the 40 `forge <op> loop` arguments, `--dry-run`, and the loop.toml reads of the fixed knobs (`watermark_margin`, `reanchor_band`, `reopen_*`, `reprice_*`, `lever_pricing_*`, `declared_gate_close`, `reuse_unchanged_reading`, `confirm_jobs`, `correctness_monitor*`, `infeasible_min_diagnoses`, `ref_price_pm_interval`, `simulator_dir`) | A.1 / A.2 "fixed defaults": now constants at the top of `loop/cli.py`; the loop reads from loop.toml only what `forge run` writes (`language`, `kb_arch`, `gate_window`, the reference keys, the NCU-availability switches) |
+| `--no-oracle` / `oracle_mode = "none"`, `ref_from_goal = "always"`, `ref_from_goal_ratio / _accept_runs / _as_target` | modes and knobs no task can express |
+| `loop/agentctx.py` (the 200k context-window gate) and the static scan for a goal-capable agent command | read the command the harness itself builds (`agents.agent_command`); `agent_policy.command_findings` keeps the one scan that still protects something (the project settings must load) |
+| `[loop] agent_allow_write`, `source_teacher_denies_ref`, `dsl_python`, the `DSL_PIN` version gate | keys nothing writes (`write_submit` never wrote `DSL_PIN`) |
+| `inner/results.py`, `inner/workspace.py`, the `cublas_*` legacy key remap, `milestone.is_valid`, `loop/__init__.py` re-exports, duplicate `_repo_root` / `_toml_value` helpers | dead or duplicated |
+
+Left in place on purpose, each a behaviour change the loop would feel and that a CPU test suite
+cannot certify (candidates for a later pass, in order of expected gain): the two-reference
+machinery (`arch_baseline.json` and its `ref_baseline.json` copy, `{ARCH_REF}` / `{REF_BASELINE}`
+bindings); the `window.toml` asymmetry / prep / pricing code, inert on generated contracts (both
+sides always share one boundary); the absolute-target and cross-machine machinery, inert while the
+reference rides the job (`ref_in_job = true`), live for generate-mode tasks; the timeline probe,
+off for ordinary tasks and on for leaderboard cards; the precision gate, off on every generated
+tree; the `meta/cuda/` prompt overlays, ~95% identical to the shared prompts; `binref` (the sealed
+binary reference of `--binary-ref` leaderboard cards).
+
+---
+
 ## Appendix A: where the old settings went
 
-The tables below describe the user surface at the level of `forge run`. The lower-level
-`forge <op> loop` still accepts the arguments that still exist, for hand-made operator trees.
+The tables below describe the user surface at the level of `forge run`. `forge <op> loop` takes
+only what `forge run` passes it (the workspace, the budget, the target, the two agent commands,
+the resume flags); the rows below that say "fixed defaults" are constants in `loop/cli.py`.
 
 ### A.1 `forge <op> loop` arguments
 

@@ -289,8 +289,9 @@ feedback, and locking them early only locks them wrong.
 
 ### A.4 ref baseline (an input prerequisite for writing the instance, not a milestone)
 
-**The ref baseline is measured before the instance file is written** (`forge <op> baseline`,
-archived in `operators/<op>/ref_baseline.json`) and injected as an input at writing time. It is
+**The ref baseline is measured before the instance file is written** (the loop measures the
+reference at its start and archives it in `operators/<op>/arch_baseline.json`) and injected as an
+input at writing time. It is
 **not** a milestone handed to the loop to execute — writing it as M0.x would require the instance
 file to write gates anchored to hardware ground truth before it has any hardware ground truth,
 which cannot be done.

@@ -44,7 +44,7 @@ target performance from scratch. This is the first step of the distillation loop
 {ARCH_REF}
 ```
 
-  `REF_BASELINE` — **the measured hardware ground truth of the library baseline** (the archive of `forge <op> baseline`, with per-kernel
+  `REF_BASELINE` — **the measured hardware ground truth of the library baseline** (the loop's archive of the reference measurement, with per-kernel
   NCU signatures). "Is it better than the off-the-shelf library" is answered by it. It is **not** what this run is reproducing.
 
 ```

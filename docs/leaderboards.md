@@ -260,8 +260,7 @@ baseline spanned 2.8 µs against 24 µs by events, and paged decode 7.6 vs 29 µ
 - safetensors inputs travel into the job with the card; some SOL problems (MoE-like) have workload
   inputs of tens of GB, which only affects GPU memory.
 - Language: the export infers it from the card's language / the kernel's imports -- `cutedsl` (FlashInfer-Bench
-  `python`, SOL `cute_dsl`), `triton`, otherwise a PyTorch host (FlashInfer-Bench `python`, SOL `pytorch`); the
-  lower-level `forge <op> leaderboard export` takes `--language` to override it.
+  `python`, SOL `cute_dsl`), `triton`, otherwise a PyTorch host (FlashInfer-Bench `python`, SOL `pytorch`).
 
 ## How it differs from an ordinary task (harness side)
 
