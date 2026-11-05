@@ -12,7 +12,7 @@
 `forge run` exits 0 when the final confirmation meets the target (and the correctness
 monitor raised no alarm on that kernel), and 2 otherwise.
 
-`forge help internal` lists the lower-level commands the loop itself uses.
+`forge help internal` lists the lower-level commands the loop and the agents use.
 """
 
 from __future__ import annotations
@@ -22,19 +22,16 @@ import sys
 INTERNAL_HELP = """\
 Lower-level commands. They act on the operator trees a run generates under
 .artifacts/<run>/operators/ -- point FORGEKERNEL_OPERATORS_DIR at that directory first.
-`forge run` drives all of them; they are listed for debugging a run, not as a second way
-to configure one.
+`forge run` drives the loop; the NCU views are what the teacher runs from its skill.
 
-  forge init <op> --kernel-file ...    -> scaffold an operator repo directly
-  forge <op> baseline --ref-cmd ...    -> measure + archive the ref (do this first)
-  forge <op> loop --workspace ...      -> run the two-layer loop
+  forge <op> loop --workspace ...      -> run the two-layer loop on an existing card
   forge <op> ncu-trace                 -> per-iteration NCU metric evolution (meta view)
-  forge <op> window                    -> check window.toml (timed-window contract) + ledger
-  forge <op> leaderboard show|export   -> the card's problem / the board's solution JSON
-  forge <op> monitor [--sha ...]       -> correctness monitor: the card's own check under
-                                          stressed inputs + kernel-output watch (advisory)
-  forge <op> submit|status|logs|stop   -> GPU-job harness (forgekernel.submit)
+  forge <op> ncu-report                -> the NCU report of one iteration
+
+GPU jobs are recorded by `python -m forgekernel.submit <op> submit|status|logs|stop`.
 """
+
+USER_COMMANDS = ("init", "new", "run", "status", "harvest", "export")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -50,10 +47,15 @@ def main(argv: list[str] | None = None) -> int:
 
         print(f"forgekernel {__version__}")
         return 0
-    if argv and argv[0] in ("init", "new", "run", "status", "harvest", "export"):
+    if argv[0] in USER_COMMANDS:
         from forgekernel.launch import COMMANDS
 
         return COMMANDS[argv[0]](argv[1:])
+
+    if len(argv) >= 2 and argv[1] == "loop":
+        from forgekernel.loop.cli import main as loop_main
+
+        return loop_main([argv[0], *argv[2:]])
 
     if len(argv) >= 2 and argv[1] == "ncu-trace":
         from forgekernel.inner.ncu import main as ncu_main
@@ -65,34 +67,8 @@ def main(argv: list[str] | None = None) -> int:
 
         return report_main([argv[0], *argv[2:]])
 
-    if len(argv) >= 2 and argv[1] == "baseline":
-        from forgekernel.baseline_cli import main as baseline_main
-
-        return baseline_main([argv[0], *argv[2:]])
-
-    if len(argv) >= 2 and argv[1] == "window":
-        from forgekernel.window_contract import main as window_main
-
-        return window_main([argv[0], *argv[2:]])
-
-    if len(argv) >= 2 and argv[1] == "leaderboard":
-        from forgekernel.leaderboard import main as leaderboard_main
-
-        return leaderboard_main([argv[0], *argv[2:]])
-
-    if len(argv) >= 2 and argv[1] == "monitor":
-        from forgekernel.monitor.cli import main as monitor_main
-
-        return monitor_main([argv[0], *argv[2:]])
-
-    if len(argv) >= 2 and argv[1] == "loop":
-        from forgekernel.loop.cli import main as loop_main
-
-        return loop_main([argv[0], *argv[2:]])
-
-    from forgekernel.submit.cli import main as submit_main
-
-    return submit_main(argv)
+    sys.stderr.write(f"forge: unknown command {' '.join(argv[:2])!r}\n\n{__doc__.strip()}\n")
+    return 2
 
 
 if __name__ == "__main__":

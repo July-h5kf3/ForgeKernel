@@ -86,12 +86,9 @@ card  = "leaderboard/card"{ref_line}
 
 def cmd_init(argv) -> int:
     """tasks/<op>/: a copy of tasks/_template/ to fill in; with --leaderboard, one board
-    problem; with any other option, an operator tree made directly (forgekernel.scaffold)."""
+    problem (forgekernel.scaffold)."""
     if "--leaderboard" in argv or any(a.startswith("--leaderboard=") for a in argv):
         return new_board_task(argv)
-    if any(a.startswith("-") and a not in ("-h", "--help") for a in argv):
-        from forgekernel.scaffold import main as scaffold_main
-        return scaffold_main(argv)
     p = argparse.ArgumentParser(prog="forge init",
                                 description="Create tasks/<op>/ from tasks/_template/.")
     p.add_argument("op")
@@ -120,7 +117,7 @@ def new_board_task(argv) -> int:
         sys.stderr.write(f"[forge] {d} already exists\n")
         return 2
     with tempfile.TemporaryDirectory(prefix="forge-new-") as tmp:
-        rc = scaffold.main([*argv, "--base-dir", tmp, "--no-git"])
+        rc = scaffold.main([*argv, "--base-dir", tmp])
         card = Path(tmp) / "operators" / op
         if rc != 0 or not card.is_dir():
             return rc          # --list-workloads, or a refusal already explained
@@ -552,7 +549,7 @@ def _refresh_machine(run, task, machine) -> None:
     for name in (task.name, taskcard.ref_tree(task.name)):
         tree = run.operators_dir / name
         if (tree / "submit.toml").exists():
-            timeout = taskcard.JOB_TIMEOUT_S if name == task.name else 2700
+            timeout = taskcard.JOB_TIMEOUT_S if name == task.name else taskcard.REF_JOB_TIMEOUT_S
             taskcard.write_submit(tree, task, machine, timeout=timeout)
             taskcard._commit(tree, "Chore: follow local.env")
 

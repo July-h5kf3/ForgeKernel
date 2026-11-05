@@ -18,7 +18,6 @@
 milestone.md            export-ignore
 README.md               export-ignore
 window.toml             export-ignore
-agent/                  export-ignore
 student/                export-ignore
 meta_status.jsonl       export-ignore
 arch_baseline.json      export-ignore

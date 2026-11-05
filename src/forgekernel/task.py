@@ -382,20 +382,23 @@ def merge_config(base: dict, top: dict) -> dict:
     return out
 
 
+def toml_value(v) -> str:
+    """One TOML value (a scalar or a list of them) as the harness writes it."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, str):
+        return json.dumps(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(toml_value(x) for x in v) + "]"
+    raise TypeError(f"{type(v).__name__} is not a TOML value")
+
+
 def dump_task_toml(cfg: dict) -> str:
     """``task.toml`` text for a config of the shape load_task reads (tables of scalars and
     lists of strings, [agent] with [agent.<role>] nested one level)."""
-    def value(v) -> str:
-        if isinstance(v, bool):
-            return "true" if v else "false"
-        if isinstance(v, (int, float)):
-            return repr(v)
-        if isinstance(v, str):
-            return json.dumps(v)
-        if isinstance(v, list):
-            return "[" + ", ".join(value(x) for x in v) + "]"
-        raise TypeError(f"{type(v).__name__} is not a task.toml value")
-
+    value = toml_value
     out = []
     for table in ("task", "leaderboard", "reference", "target", "agent", "budget"):
         body = cfg.get(table)

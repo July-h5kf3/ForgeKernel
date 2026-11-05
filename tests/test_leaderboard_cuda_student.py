@@ -40,7 +40,7 @@ def cuda_card(base: Path, sol_root: Path, tmp_path: Path) -> tuple[Path, str]:
     sp = tmp_path / "solution" / "solution.json"
     sp.parent.mkdir(exist_ok=True)
     sp.write_text(json.dumps(solution()))
-    scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--leaderboard", "sol-execbench",
+    scaffold_main(["rms", "--base-dir", str(base), "--leaderboard", "sol-execbench",
                    "--dataset", str(sol_root), "--definition", "L1/001_rms", "--workload", "0",
                    "--no-sol-board", "--binary-ref", str(sp), "--kernel-file", "kernel.cu"])
     return base / "operators" / "rms", binref.module_name(solution())
@@ -87,7 +87,6 @@ def test_the_card_names_a_cuda_kernel_file_with_a_board_format_stub(base, sol_ro
     assert "The `run` signature of `kernel.cu`" in readme and "fk-cuda-cflags" in readme
     assert loop_cli._card_kernel_file(card) == "kernel.cu"
     assert loop_cli._card_kernel_file(tmp_path) == "kernel.py"
-    assert "cuda-sol" in loop_cli.LANGUAGES
 
 
 @pytest.mark.parametrize("edit, why", [
@@ -189,7 +188,7 @@ def test_a_sealed_card_guards_cpp_probes_and_the_cuda_kernel(base, sol_root, tmp
     sp = tmp_path / "solution" / "solution.json"
     sp.parent.mkdir(exist_ok=True)
     sp.write_text(json.dumps(test_sealref.solution()))
-    scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--leaderboard", "sol-execbench",
+    scaffold_main(["rms", "--base-dir", str(base), "--leaderboard", "sol-execbench",
                    "--dataset", str(sol_root), "--definition", "L1/001_rms", "--workload", "0",
                    "--no-sol-board", "--sealed-ref", str(sp), "--kernel-file", "kernel.cu"])
     card, ref = base / "operators" / "rms", base / "operators" / "_rmsref"

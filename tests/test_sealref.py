@@ -76,11 +76,17 @@ def new_card(base: Path, sol_root: Path, tmp_path: Path, sol: dict | None = None
     sp = tmp_path / "solution" / "solution.json"
     sp.parent.mkdir(exist_ok=True)
     sp.write_text(json.dumps(sol or solution()))
-    scaffold_main(["rms", "--base-dir", str(base), *([] if git else ["--no-git"]), "--leaderboard",
+    scaffold_main(["rms", "--base-dir", str(base), "--leaderboard",
                    "sol-execbench", "--dataset", str(sol_root), "--definition", "L1/001_rms",
                    "--workload", "0", "--no-sol-board", "--sealed-ref", str(sp),
                    "--ref-source-path", "/elsewhere/plain"])
-    return base / "operators" / "rms", base / "operators" / "_rmsref", sealref.module_name(sol or solution())
+    card, ref = base / "operators" / "rms", base / "operators" / "_rmsref"
+    if git:
+        # what `forge run` does when it installs the frozen trees into a run
+        from forgekernel import taskcard
+        for tree in (card, ref):
+            taskcard._git_init(tree, "install")
+    return card, ref, sealref.module_name(sol or solution())
 
 
 def _closed_ref():

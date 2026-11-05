@@ -69,7 +69,7 @@ def new_card(base: Path, sol_root: Path, tmp_path: Path, sol: dict | None = None
     sp = tmp_path / "solution" / "solution.json"
     sp.parent.mkdir(exist_ok=True)
     sp.write_text(json.dumps(sol or solution()))
-    scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--leaderboard", "sol-execbench",
+    scaffold_main(["rms", "--base-dir", str(base), "--leaderboard", "sol-execbench",
                    "--dataset", str(sol_root), "--definition", "L1/001_rms", "--workload", "0",
                    "--no-sol-board", "--binary-ref", str(sp), "--ref-source-path", "/elsewhere/plain"])
     return base / "operators" / "rms", base / "operators" / "_rmsref", binref.module_name(sol or solution())

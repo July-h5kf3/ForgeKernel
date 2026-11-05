@@ -215,7 +215,7 @@ def test_forge_new_leaderboard_writes_a_complete_card(base: Path, fib_root: Path
 
 
 def test_generated_bench_passes_the_multi_workload_preflight(base: Path, fib_root: Path) -> None:
-    scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--leaderboard",
+    scaffold_main(["rms", "--base-dir", str(base), "--leaderboard",
                    "flashinfer-bench", "--dataset", str(fib_root), "--definition",
                    "rmsnorm_h8", "--workload", "0"])
     bench = (base / "operators" / "rms" / "eval" / "bench.py").read_text()
@@ -225,7 +225,7 @@ def test_generated_bench_passes_the_multi_workload_preflight(base: Path, fib_roo
 
 
 def test_generated_window_contract_has_no_findings(base: Path, sol_root: Path) -> None:
-    scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--leaderboard",
+    scaffold_main(["rms", "--base-dir", str(base), "--leaderboard",
                    "sol-execbench", "--dataset", str(sol_root), "--definition",
                    "L1/001_rms", "--workload", "0", "--no-sol-board"])
     text = (base / "operators" / "rms" / "window.toml").read_text()
@@ -236,7 +236,7 @@ def test_generated_window_contract_has_no_findings(base: Path, sol_root: Path) -
 
 
 def test_sol_card_locks_the_published_clock(base: Path, sol_root: Path) -> None:
-    scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--leaderboard",
+    scaffold_main(["rms", "--base-dir", str(base), "--leaderboard",
                    "sol-execbench", "--dataset", str(sol_root), "--definition",
                    "L1/001_rms", "--workload", "0", "--no-sol-board"])
     entry = (base / "operators" / "rms" / "gpu_entry.sh").read_text()
@@ -249,7 +249,7 @@ def test_sol_card_locks_the_published_clock(base: Path, sol_root: Path) -> None:
 
 def test_bad_choice_does_not_leave_a_half_card(base: Path, fib_root: Path) -> None:
     with pytest.raises(SystemExit, match="matches 0 of 2"):
-        scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--leaderboard",
+        scaffold_main(["rms", "--base-dir", str(base), "--leaderboard",
                        "flashinfer-bench", "--dataset", str(fib_root), "--definition",
                        "rmsnorm_h8", "--workload", "nope"])
     assert not (base / "operators" / "rms").exists()
@@ -269,7 +269,7 @@ def test_list_workloads_prints_and_scaffolds_nothing(base: Path, fib_root: Path,
 # --- export ---------------------------------------------------------------------------
 
 def _card(base: Path, root: Path, suite: str, definition: str) -> Path:
-    scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--leaderboard", suite,
+    scaffold_main(["rms", "--base-dir", str(base), "--leaderboard", suite,
                    "--dataset", str(root), "--definition", definition, "--workload", "0"]
                   + (["--no-sol-board"] if suite == "sol-execbench" else []))
     card = base / "operators" / "rms"
@@ -313,18 +313,6 @@ def test_export_refuses_a_drifted_signature(base: Path, fib_root: Path) -> None:
 ])
 def test_infer_language(src: str, loop_lang, want: str) -> None:
     assert lb.infer_language(src, loop_lang) == want
-
-
-def test_leaderboard_cli_show_and_export(base: Path, fib_root: Path, capsys,
-                                         tmp_path: Path) -> None:
-    _card(base, fib_root, "flashinfer-bench", "rmsnorm_h8")
-    assert lb.main(["rms", "show", "--base-dir", str(base)]) == 0
-    assert "signature OK" in capsys.readouterr().out
-    out = tmp_path / "sol.json"
-    assert lb.main(["rms", "export", "--base-dir", str(base), "--out", str(out),
-                    "--name", "x"]) == 0
-    assert json.loads(out.read_text())["name"] == "x"
-    assert lb.main(["nope", "show", "--base-dir", str(base)]) == 2
 
 
 # --- SOL board: T_b / T_SOL, the SOL score and the loop's target -------------------------
@@ -392,7 +380,7 @@ def test_forge_new_sol_fetches_the_board_and_the_loop_targets_T_b(
     from forgekernel.loop.cli import (_declared_arch_baseline, _resolve_ref_in_job,
                                       _resolve_ref_spec, _resolve_target_ms)
     _fake_api(monkeypatch)
-    assert scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--leaderboard",
+    assert scaffold_main(["rms", "--base-dir", str(base), "--leaderboard",
                           "sol-execbench", "--dataset", str(sol_root), "--definition",
                           "L1/001_rms", "--workload", "1"]) == 0
     card = base / "operators" / "rms"
@@ -422,7 +410,7 @@ def test_forge_new_sol_fetches_the_board_and_the_loop_targets_T_b(
 def test_forge_new_sol_without_a_board_asks_for_an_explicit_target(
         base: Path, sol_root: Path, capsys) -> None:
     # the autouse fixture makes the board unreachable
-    assert scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--leaderboard",
+    assert scaffold_main(["rms", "--base-dir", str(base), "--leaderboard",
                           "sol-execbench", "--dataset", str(sol_root), "--definition",
                           "L1/001_rms", "--workload", "0"]) == 0
     assert "NOTE SOL board not read" in capsys.readouterr().out
@@ -439,20 +427,20 @@ def test_forge_new_sol_board_from_a_saved_file(base: Path, sol_root: Path,
                                                tmp_path: Path) -> None:
     saved = tmp_path / "kernels_7.json"
     saved.write_text(json.dumps({"data": SOL_BOARD}))
-    assert scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--leaderboard",
+    assert scaffold_main(["rms", "--base-dir", str(base), "--leaderboard",
                           "sol-execbench", "--dataset", str(sol_root), "--definition",
                           "L1/001_rms", "--workload", "0", "--sol-board", str(saved)]) == 0
     board = json.loads((base / "operators" / "rms" / lb.PROBLEM_FILE).read_text())["sol_board"]
     assert board["t_b_ms"] == 0.04 and board["source"] == str(saved)
     with pytest.raises(SystemExit, match="sol-execbench options"):
-        scaffold_main(["rms2", "--base-dir", str(base), "--no-git", "--leaderboard",
+        scaffold_main(["rms2", "--base-dir", str(base), "--leaderboard",
                        "flashinfer-bench", "--dataset", str(sol_root), "--definition", "x",
                        "--no-sol-board"])
 
 
 def test_fib_loop_example_declares_the_baseline_and_no_inert_flag(base: Path,
                                                                   fib_root: Path) -> None:
-    scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--leaderboard",
+    scaffold_main(["rms", "--base-dir", str(base), "--leaderboard",
                    "flashinfer-bench", "--dataset", str(fib_root), "--definition",
                    "rmsnorm_h8", "--workload", "0"])
     card = base / "operators" / "rms"
@@ -622,7 +610,7 @@ def test_forge_new_sol_group_card_targets_the_geomean_of_T_b(base: Path, sol_roo
     from forgekernel.loop.cli import _declared_arch_baseline
     from forgekernel.window_contract import bench_times_workloads
     _fake_api(monkeypatch)
-    assert scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--leaderboard",
+    assert scaffold_main(["rms", "--base-dir", str(base), "--leaderboard",
                           "sol-execbench", "--dataset", str(sol_root), "--definition",
                           "L1/001_rms", "--workload", "0,1"]) == 0
     card = base / "operators" / "rms"
@@ -649,7 +637,7 @@ def test_forge_new_sol_group_card_targets_the_geomean_of_T_b(base: Path, sol_roo
 def test_single_workload_leaderboard_card_is_not_a_multi_workload_gate(base: Path,
                                                                        sol_root: Path) -> None:
     from forgekernel.window_contract import bench_times_workloads
-    scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--leaderboard",
+    scaffold_main(["rms", "--base-dir", str(base), "--leaderboard",
                    "sol-execbench", "--dataset", str(sol_root), "--definition",
                    "L1/001_rms", "--workload", "0", "--no-sol-board"])
     assert bench_times_workloads(base / "operators" / "rms") is False
@@ -659,8 +647,7 @@ def test_fib_group_card_copies_every_workloads_blobs(base: Path, fib_root: Path)
     p = lb.fib_problem(fib_root, "rmsnorm_h8", "0-1")
     assert [g["workload"]["uuid"] for g in p.group] == ["aaaa-1111", "bbbb-2222"]
     assert p.reference_impl["kind"] == "baseline_solution"
-    assert lb.main(["rms", "show", "--base-dir", str(base)]) == 2
-    scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--leaderboard",
+    scaffold_main(["rms", "--base-dir", str(base), "--leaderboard",
                    "flashinfer-bench", "--dataset", str(fib_root), "--definition",
                    "rmsnorm_h8", "--workload", "1,0"])
     problem = json.loads((base / "operators" / "rms" / lb.PROBLEM_FILE).read_text())
@@ -740,7 +727,7 @@ def test_check_workloads_ride_the_card_judged_never_timed(tmp_path: Path, base: 
     # the group's true extremes are correctness-only workloads: the meta tools read them
     assert out["meta_workloads"] == ["wl1", "wl0", "wl4"]
     assert "check_only" not in lb.problem_json(lb.sol_problem(root, "L1/001_rms", "1,2"))
-    assert scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--leaderboard",
+    assert scaffold_main(["rms", "--base-dir", str(base), "--leaderboard",
                           "sol-execbench", "--dataset", str(root), "--definition",
                           "L1/001_rms", "--workload", "1,2", "--check-workload", "0-4",
                           "--no-sol-board"]) == 0
@@ -759,4 +746,4 @@ def test_check_workloads_ride_the_card_judged_never_timed(tmp_path: Path, base: 
 
 def test_check_workload_needs_the_leaderboard(base: Path) -> None:
     with pytest.raises(SystemExit):
-        scaffold_main(["rms", "--base-dir", str(base), "--no-git", "--check-workload", "3"])
+        scaffold_main(["rms", "--base-dir", str(base), "--check-workload", "3"])
