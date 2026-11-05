@@ -148,22 +148,6 @@ def test_record_sha_defaults_empty():
     assert _rec().sha == ""
 
 
-def test_load_records_maps_legacy_in_job_reference_keys():
-    # status.jsonl written before the single-ref rename recorded the in-job reference
-    # under cublas_* whatever library it was; resuming such a run keeps its ratios
-    import json as _json
-    from pathlib import Path
-    import tempfile
-    with tempfile.TemporaryDirectory() as d:
-        p = Path(d) / "status.jsonl"
-        p.write_text(_json.dumps({
-            "iter": 0, "decision_id": "D1", "change": "x", "correctness": True,
-            "verdict": "KEEP", "device_median_ms": 0.2585,
-            "cublas_device_ms": 0.2693, "vs_cublas_device": 1.0418}) + "\n")
-        rec = load_records(p)[0]
-        assert rec.ref_device_ms == 0.2693 and rec.vs_ref_device == 1.0418
-
-
 _DIFF_A = ("correctness FAIL: dq: max_diff=4.504025 tol=0.07852; "
            "dk: max_diff=7.560892 tol=0.080503; dv: max_diff=7.823140 tol=0.156463")
 _DIFF_B = ("correctness FAIL: dq: max_diff=0.913311 tol=0.07852; "

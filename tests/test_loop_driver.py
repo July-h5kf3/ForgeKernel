@@ -5718,7 +5718,8 @@ def test_gate_baseline_skips_a_reverted_segment(tmp_path):
     standing tree that is +14%, and the reverted segment's 14.43 must not be
     the reading it is held to — that would re-admit the ixbwd case one
     revert later."""
-    from forgekernel.loop.driver import _gate_regression, _previous_gate_reading
+    from forgekernel.inner.trajectory import gate_ms
+    from forgekernel.loop.driver import _gate_regression, _previous_gate_record
     be = FakeBackend([REC("M0-gate", 14.0)], [EVAL(14.0), NCU])
     ctx = _ctx(tmp_path, be, target_ms=1.0)
     _seed_keep(ctx, "M0-gate", 12.31, sha="shaA")
@@ -5727,9 +5728,11 @@ def test_gate_baseline_skips_a_reverted_segment(tmp_path):
     _seed_keep(ctx, "M0-gate", 14.43, sha="shaB2")
     reverted_hi = len(load_records(ctx.status_path))
     recs = load_records(ctx.status_path)
-    assert _previous_gate_reading(recs, "M0-gate", reverted_hi, ctx.gate_window) == 14.43
-    assert _previous_gate_reading(recs, "M0-gate", reverted_hi, ctx.gate_window,
-                                  voided=[(reverted_lo, reverted_hi)]) == 12.31
+    assert gate_ms(_previous_gate_record(recs, "M0-gate", reverted_hi, ctx.gate_window),
+                   ctx.gate_window) == 14.43
+    assert gate_ms(_previous_gate_record(recs, "M0-gate", reverted_hi, ctx.gate_window,
+                                         voided=[(reverted_lo, reverted_hi)]),
+                   ctx.gate_window) == 12.31
     ctx.voided_ranges.append((reverted_lo, reverted_hi))
     reason = run_inner_loop(ctx, reverted_hi, initial_green=True,
                             segment_records_before=reverted_hi)

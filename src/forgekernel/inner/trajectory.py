@@ -120,12 +120,6 @@ class IterationRecord:
 
 _FIELDS = {f.name for f in fields(IterationRecord)}
 
-# Pre-rename key names (the in-job reference was recorded under cublas_* whatever
-# library it actually was). Mapped on load so resuming an older run keeps its
-# ratio history; written files use the new names only.
-_LEGACY_KEYS = {"cublas_median_ms": "ref_median_ms", "vs_cublas": "vs_ref",
-                "cublas_device_ms": "ref_device_ms", "vs_cublas_device": "vs_ref_device"}
-
 # The two timing windows a bench can measure (see EvalResult in loop/parse.py for
 # the full account). "e2e" is the per-call window — host work lands inside it —
 # and has been the gate since the series began; "device" is the pipelined batch
@@ -176,7 +170,6 @@ def load_records(path: str | Path) -> list[IterationRecord]:
         line = line.strip()
         if line:
             d = json.loads(line)
-            d = {_LEGACY_KEYS.get(k, k): v for k, v in d.items()}
             out.append(IterationRecord(**{k: v for k, v in d.items() if k in _FIELDS}))
     return out
 

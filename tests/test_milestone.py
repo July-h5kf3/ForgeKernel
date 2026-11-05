@@ -1,6 +1,6 @@
 """Tests for milestone schema validation (formatted, not free-form)."""
 
-from forgekernel.milestone import is_valid, parse_milestone_dag, validate_milestone
+from forgekernel.milestone import parse_milestone_dag, validate_milestone
 
 VALID = """\
 # demo_op milestone
@@ -49,14 +49,12 @@ BM=128, BN=256, BK=64.
 
 def test_valid_milestone_conforms():
     assert validate_milestone(VALID) == []
-    assert is_valid(VALID)
 
 
 def test_missing_section_flagged():
     broken = VALID.replace("## 5. Global correctness / performance gate", "## 5b. something else")
     v = validate_milestone(broken)
     assert any("## 5." in x for x in v)
-    assert not is_valid(broken)
 
 
 def test_missing_worked_example_flagged():

@@ -7764,12 +7764,6 @@ def _previous_gate_record(records, gate_id: str, before: int, gate_window: str,
     return None
 
 
-def _previous_gate_reading(records, gate_id: str, before: int, gate_window: str,
-                           voided: "list[tuple[int, int]] | None" = None):
-    r = _previous_gate_record(records, gate_id, before, gate_window, voided)
-    return None if r is None else gate_ms(r, gate_window)
-
-
 # Same-stage tolerance on absolute ms across two jobs. The same-job ratio
 # (_GATE_REGRESSION_TOLERANCE above) is one card, one minute; an absolute
 # reading carries the node population on top — one unchanged commit moves ~6%
@@ -10017,7 +10011,7 @@ BLACKBOX_GUARD_NAME = "blackbox-guard.sh"
 
 def _blackbox_guard_source() -> "Path | None":
     """scripts/blackbox-guard.sh of the checkout this driver runs from. The harness
-    runs from its source tree (cli._repo_root is the same resolution); under a
+    runs from its source tree (paths.repo_root is the same resolution); under a
     wheel install there is no scripts/ and the seeding logs and skips."""
     p = Path(__file__).resolve().parents[3] / "scripts" / BLACKBOX_GUARD_NAME
     return p if p.is_file() else None
@@ -11452,12 +11446,12 @@ def run_two_layer(ctx: LoopContext, max_meta: int = 3) -> dict:
     if _needs_authoring(ctx):
         # Distillation without a measured ref writes gates it cannot anchor: every
         # number would be an [ESTIMATE], including target_ms, which is the stop
-        # threshold. Measure first (`forge <op> baseline`) — that is the whole point
-        # of doing this before v1 rather than backfilling after M0.x.
+        # threshold. The loop measures the reference first (loop/cli.py) — that is the
+        # whole point of doing this before v1 rather than backfilling after M0.x.
         if ctx.ref_baseline is None:
             _log("meta/distill: no ref baseline and the operator does not declare one "
-                 "-> refusing to distill. Add [loop] ref_cmd to operators/<op>/loop.toml "
-                 "so the loop can measure it, or run `forge <op> baseline --ref-cmd ...`")
+                 "-> refusing to distill. The loop measures the reference loop.toml names "
+                 "(ref_mode / ref_cmd) before distillation; none is declared here")
             return {"stop": "no_ref_baseline", "meta_steps": 0}
         _log(f"meta/distill: ref baseline {ctx.ref_baseline.ms} ms "
              f"(job {ctx.ref_baseline.job or '?'}, ncu={'yes' if ctx.ref_baseline.has_ncu else 'no'})"

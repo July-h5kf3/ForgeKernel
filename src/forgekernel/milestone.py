@@ -474,10 +474,6 @@ def _dependency_cycles(upstream: dict[str, set[str]]) -> list[list[str]]:
     return found
 
 
-def is_valid(text: str) -> bool:
-    return not validate_milestone(text)
-
-
 # --- operand-source adjudication lint (template A.5 "operand-source verification
 # line") ---------------------------------------------------------------------------
 #

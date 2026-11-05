@@ -1,6 +1,5 @@
-"""Inner student loop: GPU result parsing + structured trajectory (status.jsonl)."""
+"""Inner student loop: the structured trajectory (status.jsonl) and the NCU digest."""
 
-from forgekernel.inner.results import parse_correctness, parse_perf
 from forgekernel.inner.trajectory import (
     GATE_WINDOWS,
     IterationRecord,
@@ -11,8 +10,6 @@ from forgekernel.inner.trajectory import (
 )
 
 __all__ = [
-    "parse_correctness",
-    "parse_perf",
     "IterationRecord",
     "append_record",
     "load_records",
