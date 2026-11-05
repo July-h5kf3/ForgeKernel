@@ -10,8 +10,8 @@ into ``eval/leaderboard/problem.json`` and wires the card to
 ``src/forgekernel/card_template/eval/leaderboard.py``, which reproduces the suite's evaluation
 protocol (pinned upstream commits; the file's docstring lists what is and is not
 covered). The student's kernel keeps the definition's signature, so the kept kernel
-is what gets submitted: ``forge <op> leaderboard export`` writes the suite's
-solution JSON from it.
+is what gets submitted: ``forge export`` writes the suite's solution JSON from it
+(``export_solution``).
 
 One card = one workload, or one GROUP of workloads (``--workload 3,5,9`` / ``3-7``): a
 board averages over all of a definition's workloads, and a size class of them (the shapes
@@ -40,20 +40,16 @@ for offline use).
 
 from __future__ import annotations
 
-import argparse
 import ast
 import json
 import math
 import operator
 import re
 import shutil
-import sys
 import tomllib
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-
-from forgekernel.paths import operators_dir
 
 SUITE_FIB = "flashinfer-bench"
 SUITE_SOL = "sol-execbench"
@@ -1282,7 +1278,7 @@ def render_readme_section(problem: Problem, kernel_file: str = "kernel.py") -> s
 - The `run` signature of `{kf}` is frozen by the board definition (parameter names = the
   definition's inputs + outputs, DPS).{cuda_line}
 {selftest}
-- Submission: `forge <op> leaderboard export` writes the board's solution JSON.{notes}
+- Submission: `forge export <run>` writes the board's solution JSON.{notes}
 """
 
 
@@ -1455,65 +1451,3 @@ def _loop_language(op_dir: Path) -> str | None:
         return tomllib.loads(path.read_text(encoding="utf-8")).get("loop", {}).get("language")
     except (OSError, ValueError):
         return None
-
-
-# --- CLI: forge <op> leaderboard show|export -------------------------------------------
-
-def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="forge <op> leaderboard")
-    p.add_argument("op")
-    p.add_argument("action", choices=["show", "export"])
-    p.add_argument("--base-dir", default=None, help="repo root override (testing)")
-    p.add_argument("--out", default=None, help="export: write here (default: stdout)")
-    p.add_argument("--name", default=None, help="export: solution name")
-    p.add_argument("--author", default="forgekernel", help="export: solution author")
-    p.add_argument("--language", default=None, choices=sorted(_EXPORT_LANG),
-                   help="export: override the inferred language")
-    p.add_argument("--hardware", default="B200", help="export: target hardware")
-    args = p.parse_args(argv)
-
-    ops = Path(args.base_dir) / "operators" if args.base_dir else operators_dir()
-    op_dir = ops / args.op
-    pfile = op_dir / PROBLEM_FILE
-    if not pfile.is_file():
-        sys.stderr.write(f"[leaderboard] {args.op} is not a leaderboard card ({pfile} "
-                         f"missing; create one with `forge init <op> --leaderboard ...`)\n")
-        return 2
-    problem = json.loads(pfile.read_text(encoding="utf-8"))
-    if args.action == "show":
-        ref = problem.get("reference_impl") or {}
-        print(f"suite       {problem['suite']}  ({(problem.get('source') or {}).get('upstream')})")
-        print(f"definition  {problem['definition']['name']}  op_type="
-              f"{problem['definition'].get('op_type')}")
-        for g in problem.get("group") or [{"name": "", "workload": problem["workload"]}]:
-            print(f"workload    {g['name'] + ' ' if g['name'] else ''}"
-                  f"{g['workload'].get('uuid')}  axes={json.dumps(g['workload'].get('axes'))}")
-        for g in problem.get("check_only") or []:
-            print(f"check only  {g['name']} {g['workload'].get('uuid')}  "
-                  f"axes={json.dumps(g['workload'].get('axes'))}  (judged, never timed)")
-        print(f"reference   {ref.get('name') or 'definition reference'} ({ref.get('kind')})"
-              + ("" if problem.get("time_reference", True) else "  [not timed in-job]"))
-        if board := problem.get("sol_board"):
-            print(f"sol board   T_b {board['t_b_ms']} ms  T_SOL {board['t_sol_ms']} ms  "
-                  f"(problem {board.get('kernel_id')}, workload {board.get('workload_index')})")
-        elif problem["suite"] == SUITE_SOL:
-            print("sol board   (none attached — no SOL score, no board-derived target)")
-        src = (op_dir / problem.get("kernel_file", "kernel.py")).read_text(encoding="utf-8")
-        bad = signature_findings(src, problem)
-        print("kernel.py   " + ("signature OK" if not bad else f"SIGNATURE: {bad[0]}"))
-        return 0
-    try:
-        sol = export_solution(op_dir, name=args.name or f"{args.op}_forgekernel",
-                              author=args.author, language=args.language,
-                              hardware=args.hardware)
-    except (OSError, ValueError) as e:
-        sys.stderr.write(f"[leaderboard] export refused: {e}\n")
-        return 2
-    text = json.dumps(sol, indent=2) + "\n"
-    if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
-        print(f"[leaderboard] wrote {args.out} ({problem['suite']} solution "
-              f"{sol['name']} for {sol['definition']})")
-    else:
-        sys.stdout.write(text)
-    return 0

@@ -101,8 +101,6 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from forgekernel.paths import operators_dir
-
 WINDOW_FILENAME = "window.toml"
 SCHEMA_VERSION = 1
 
@@ -419,13 +417,13 @@ def window_findings(contract: WindowContract | None) -> list[str]:
     Both directions are held to the same rule: every reference input the
     student does not receive, every student input the reference does not
     receive, and every output only one side produces needs an entry. Each
-    finding names the fix. The list is what ``loop start`` prints before
-    refusing (exit ``EXIT_WINDOW_UNDECLARED``) and what ``forge <op> window``
-    shows an author editing the file.
+    finding names the fix. The list is what the loop prints before refusing to
+    start (exit ``EXIT_WINDOW_UNDECLARED``).
     """
     if contract is None:
-        return [f"{WINDOW_FILENAME} is absent — declare the reference's and the student's "
-                f"timed-call boundaries (copy src/forgekernel/card_template/{WINDOW_FILENAME})"]
+        return [f"{WINDOW_FILENAME} is absent — `forge run` generates it from the judge's "
+                f"signature (taskcard.render_window_toml); a hand-made tree declares the "
+                f"reference's and the student's timed-call boundaries in it"]
     out: list[str] = []
     for lst, where, what in (
             (contract.reference_inputs, "[reference].inputs",
@@ -1173,59 +1171,3 @@ def render_window_ledger(contract: WindowContract | None, *,
                  "**kernel quality cannot remove**; stop, KEEP and target still use the raw ratio, "
                  "and the tax-credited ratio only goes into diagnosis and the finish report.")
     return "\n".join(lines)
-
-
-# --- forge <op> window -------------------------------------------------------
-
-def main(argv: list[str] | None = None) -> int:
-    """``forge <op> window`` — validate the card's window.toml and print the ledger
-    off whatever is archived (baselines' per-kernel tables, the best KEEP's)."""
-    import argparse
-
-    p = argparse.ArgumentParser(prog="forge <op> window")
-    p.add_argument("op")
-    p.add_argument("--base-dir", default=None, help="repo root override (testing)")
-    p.add_argument("--json", action="store_true", help="print the credit dict as JSON")
-    args = p.parse_args(argv)
-    ops = Path(args.base_dir) / "operators" if args.base_dir else operators_dir()
-    op_dir = ops / args.op
-    try:
-        contract = load_window_contract(op_dir)
-    except ValueError as e:
-        print(f"[window] error: {e}")
-        return 2
-    findings = window_findings(contract)
-    for f in findings:
-        print(f"[window] {f}")
-    for w in window_warnings(contract):
-        print(f"[window] note: {w}")
-    from forgekernel.baseline import ROLE_ARCHITECTURE, load_baseline
-    ref = None
-    try:
-        ref = load_baseline(op_dir, ROLE_ARCHITECTURE) or load_baseline(op_dir)
-    except ValueError as e:
-        print(f"[window] baseline unreadable: {e}")
-    best = None
-    status = op_dir / "student" / "status.jsonl"
-    if status.exists():
-        from forgekernel.inner.trajectory import load_records
-        kept = [r for r in load_records(status) if r.verdict == "KEEP" and r.kernels]
-        if kept:
-            best = min(kept, key=lambda r: r.device_median_ms or r.bwd_median_ms or float("inf"))
-    stu_ms = (best.device_median_ms or best.bwd_median_ms) if best else None
-    print(render_window_ledger(
-        contract,
-        ref_kernels=ref.kernels if ref else None,
-        ref_ms=ref.device_anchor_ms if ref else None,
-        ref_label=baseline_label(ref), ref_profiler=ref.ncu if ref else None,
-        student_kernels=best.kernels if best else None, student_ms=stu_ms,
-        student_label=f"best KEEP iter {best.iter}" if best else "",
-        student_profiler=best.profiler if best else None,
-        student_prep=best.prep if best else None))
-    if args.json:
-        print(json.dumps(window_credit(
-            contract, best.kernels if best else None, ref.kernels if ref else None,
-            student_profiler=best.profiler if best else None, student_ms=stu_ms,
-            ref_profiler=ref.ncu if ref else None,
-            ref_ms=ref.device_anchor_ms if ref else None), indent=1))
-    return 1 if findings else 0
