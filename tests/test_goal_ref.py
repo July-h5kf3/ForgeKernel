@@ -134,13 +134,14 @@ SLOW_OK = "def run(x, out):\n    out.copy_(x)\n# MS=2.0 # OK\n"
 FAST_OK = "def run(x, out):\n    out.copy_(x)\n# MS=0.8 # OK\n"
 
 
-def test_uncertain_orca_launch_does_not_restart_reference_generation(tmp_path):
+@pytest.mark.parametrize("marker", ("FK_AGENT_UNCERTAIN", "FK_AGENT_UNSUPPORTED"))
+def test_uncertain_or_unsupported_agent_does_not_restart_reference_generation(tmp_path, marker):
     g, _, _ = _gen(tmp_path, [])
     failing = tmp_path / "uncertain.py"
-    failing.write_text('import sys\nsys.stderr.write("FK_AGENT_UNCERTAIN: lost receipt")\n'
+    failing.write_text(f'import sys\nsys.stderr.write("{marker}: cannot start")\n'
                        'raise SystemExit(1)\n')
     g.agent_cmd = f"{sys.executable} {failing}"
-    with pytest.raises(gr.GoalRefError, match="FK_AGENT_UNCERTAIN"):
+    with pytest.raises(gr.GoalRefError, match=marker):
         gr.generate(g)
     state = gr.load_state(g.op_dir)
     assert len(state["attempts"]) == 1

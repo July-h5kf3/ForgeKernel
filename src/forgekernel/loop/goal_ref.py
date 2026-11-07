@@ -1265,8 +1265,11 @@ def _run_session(g: Generation, state: dict, svc: Service, ws: Path, task: str) 
         save_state(g.op_dir, state)
         g.log(f"attempt {k} ended rc={rc} ({rec['outcome'] or 'no leg result'}; "
               f"{svc.summary_line()})")
-        if "FK_AGENT_UNCERTAIN" in err_p.read_text(encoding="utf-8", errors="replace"):
+        diagnostic = err_p.read_text(encoding="utf-8", errors="replace")
+        if "FK_AGENT_UNCERTAIN" in diagnostic:
             _fail(g, state, "FK_AGENT_UNCERTAIN: inspect the preserved Orca turn before retrying")
+        if "FK_AGENT_UNSUPPORTED" in diagnostic:
+            _fail(g, state, diagnostic.strip()[-1000:])
         if rc != 0 and rec["end"] - rec["start"] < 120 and g.now() < deadline:
             g.sleep(min(600.0, 60.0 * k, max(0.0, deadline - g.now())))
 

@@ -370,7 +370,7 @@ class RealBackend:
         outage_waits = 0
         while attempt < self.agent_retries:
             rc, out, err = self._agent_turn(cmd, prompt, role)
-            if "FK_AGENT_UNCERTAIN" in err:
+            if "FK_AGENT_UNCERTAIN" in err or "FK_AGENT_UNSUPPORTED" in err:
                 raise AgentError(err.strip())
             if rc == 0 and out.strip():
                 from forgekernel.workspace import sync_agent_workspace

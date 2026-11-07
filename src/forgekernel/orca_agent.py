@@ -191,7 +191,7 @@ def run_turn(agent: str, role: str, model: str, effort: str | None,
     if policy.get("role") != role and os.environ.get("FK_AGENT_DRIVER") != "goal":
         raise OrcaError("agent policy role does not match this turn")
     if agent == "agy" and os.environ.get("FK_AGENT_DRIVER") == "goal":
-        raise OrcaError("agy file-only turns cannot drive reference-generation commands; "
+        raise OrcaError("FK_AGENT_UNSUPPORTED: agy file-only turns cannot drive reference-generation commands; "
                         "provide a reference or choose a teacher with shell tools")
     if (agent == "grok" and sys.platform == "darwin"
             and (policy.get("offline") or policy.get("no_cluster") or policy.get("deny_urls"))):
