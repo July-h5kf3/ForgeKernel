@@ -25,6 +25,15 @@ arch     = "sm100"                   # the target GPU (sm90, sm100, ...)
 # model  = "claude-opus-5-5"
 # effort = "high"
 
+# Each role independently chooses claude | codex | grok and a model available in that CLI.
+# This is one example; either role can use any supported backend, including the same one.
+# [agent.teacher]
+# backend = "codex"
+# model = "default"                  # or an explicit model ID
+# [agent.student]
+# backend = "grok"
+# model = "default"
+
 # [budget]
 # hours           = 4                # the loop's wall clock: reconnaissance, distillation, student rounds
 # max_meta        = 3                # teacher rounds that revise the milestone

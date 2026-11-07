@@ -127,7 +127,10 @@ FK_WORKSPACE_PYTHON=python3
 远端只需 Bash、Python 标准库及任务使用的 CUDA/PyTorch/NCU 环境，不需要 ForgeKernel 的 agent
 模块。同步失败会保留本机工作副本并停止，不重跑已成功的 agent 回合；可在本机查看状态和续跑。
 
-**teacher 用 Codex，student 用 Grok。** 在任务 `task.toml` 中添加：
+**teacher 和 student 的框架与模型均可独立选择。** 两侧各自支持 `claude`、`codex`、`grok`，
+可以使用不同框架，也可以使用同一框架的不同模型。`backend` 选择执行框架，`model` 填写该框架
+可用的模型 ID；ForgeKernel 不限制模型名单，原样传给对应 CLI，可用性由 CLI 和账号决定。
+以下是 teacher 用 Codex、student 用 Grok 的一个示例，在任务 `task.toml` 中配置：
 
 ```toml
 [agent.teacher]
@@ -140,9 +143,12 @@ backend = "grok"
 model = "default"
 ```
 
-`default` 使用各 CLI 自身的默认模型，也可指定具体模型。两种 backend 目前仅支持
-`provider = "native"`。只需在本机安装并登录 Codex CLI、Grok Build CLI，并启动可用的 Orca
-runtime；Linux 本机的 CLI 名称为 `orca-ide`，或通过
+`default` 使用对应 CLI 自身的默认模型，三种框架均支持。切换 `backend` 时，未显式配置的
+`model` 和 `provider` 分别重置为 `default` 和 `native`，避免继承另一框架的模型或服务端点。
+`effort`、`timeout_s` 也可按角色分别配置；配置优先级仍为全局配置 → 任务公共配置 → 任务角色配置。
+Codex 和 Grok 两种 backend 目前仅支持
+`provider = "native"`。本机只需安装并登录所选框架的 CLI；选择 Codex 或 Grok 时，还需启动
+可用的 Orca runtime。Claude 保留现有 CLI 启动方式。Linux 本机的 Orca CLI 名称为 `orca-ide`，或通过
 `ORCA_CLI_COMMAND` 指定。也可用 `FK_ORCA_WORKSPACE` 选择已有 Orca workspace。
 
 Orca 托管每次非交互回合，ForgeKernel 负责 prompt、milestone、GPU 反馈和最终回复的传递。

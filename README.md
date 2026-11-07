@@ -125,7 +125,10 @@ state. Logs and verdicts return to the local controller. Git metadata, agent con
 `local.env` and `*.local.toml` are excluded. Only controller-marked mirrors may be replaced.
 A sync failure preserves local files and stops without repeating an already successful turn.
 
-Teacher and student can use different harnesses through Orca:
+Teacher and student choose their harness and model independently. Each role supports `claude`,
+`codex`, or `grok`, including the same harness with different models or reversed roles.
+`backend` selects the harness; `model` is forwarded unchanged to its CLI without a ForgeKernel
+model allowlist. Model availability depends on that CLI and account. One example is:
 
 ```toml
 [agent.teacher]
@@ -138,9 +141,13 @@ backend = "grok"
 model = "default"
 ```
 
-`default` uses the native CLI's model default; an explicit model is also supported. Both backends
-currently require `provider = "native"`. Install and authenticate Codex CLI and Grok Build CLI
-locally, with an Orca runtime running (`orca-ide` on Linux, or `ORCA_CLI_COMMAND`).
+`default` uses the CLI's model default for all three harnesses. Changing `backend` resets an
+unspecified `model`/`provider` to `default`/`native`, avoiding another harness's inherited model
+or endpoint. `effort` and `timeout_s` can also differ by role; task role settings override task
+common settings, which override global settings. Codex and Grok currently require
+`provider = "native"`. Install and authenticate only the selected CLIs locally. Codex and
+Grok require a local Orca runtime (`orca-ide` on Linux, or `ORCA_CLI_COMMAND`); Claude keeps
+its existing direct CLI launcher.
 `FK_ORCA_WORKSPACE` optionally selects an existing Orca workspace; otherwise the checkout is
 registered as a folder. Orca owns each headless turn's terminal; ForgeKernel passes prompts and
 collects final responses through private files, enforcing timeouts and closing only its own terminal.

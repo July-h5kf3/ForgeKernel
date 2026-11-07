@@ -40,4 +40,7 @@ fi
 if [ "${FK_AGENT_DRIVER:-}" = "goal" ]; then
     exec "$PY" "$HERE/claude-goal.py" "$MODEL" "$MODEL" "${ARGS[@]}"
 fi
-exec "$PY" "$HERE/timeout-run.py" "$TIMEOUT" "${FK_CLAUDE_BIN:-claude}" -p --model "$MODEL" "${ARGS[@]}"
+if [ "$MODEL" != "default" ]; then
+    ARGS=(--model "$MODEL" "${ARGS[@]}")
+fi
+exec "$PY" "$HERE/timeout-run.py" "$TIMEOUT" "${FK_CLAUDE_BIN:-claude}" -p "${ARGS[@]}"
