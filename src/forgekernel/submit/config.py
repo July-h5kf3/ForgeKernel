@@ -47,6 +47,7 @@ class SubmitConfig:
     exec_workdir: str = ""
     exec_env_file: str = ""
     exec_gpu: str = "0"
+    exec_workspace: str = ""  # persistent run directory; jobs use jobs/<op>/ beneath it
 
     @property
     def cluster(self) -> str:
@@ -87,6 +88,12 @@ def load_config(op: str, base_dir: str | Path | None = None) -> SubmitConfig:
     if delivery == "ssh" and (not host or not workdir.startswith("/")):
         raise ValueError(f"{main}: ssh delivery needs [exec] host and an absolute "
                          f"[exec] workdir")
+    workspace = str(ex.get("workspace", ""))
+    if workspace:
+        from pathlib import PurePosixPath
+        path, root = PurePosixPath(workspace), PurePosixPath(workdir)
+        if delivery != "ssh" or ".." in path.parts or root not in path.parents:
+            raise ValueError("[exec] workspace must be beneath the SSH workdir")
     return SubmitConfig(
         branch=repo["branch"],
         entry_script=repo.get("entry_script", "gpu_entry.sh"),
@@ -99,6 +106,7 @@ def load_config(op: str, base_dir: str | Path | None = None) -> SubmitConfig:
         exec_workdir=workdir,
         exec_env_file=str(ex.get("env_file", "")),
         exec_gpu=str(ex.get("gpu", "0")),
+        exec_workspace=workspace,
     )
 
 

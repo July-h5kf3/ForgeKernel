@@ -322,7 +322,7 @@ class RealBackend:
         """
         proc = subprocess.Popen(
             cmd, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, cwd=self.workspace,
+            stderr=subprocess.PIPE, text=True, cwd=self.workspace, start_new_session=True,
         )
         box: dict = {}
 
@@ -348,7 +348,8 @@ class RealBackend:
             # pipes. `subprocess.run` killed the child on its way out; a Popen
             # driven from a thread must do that by hand, or the agent (a claude
             # process) outlives the loop and keeps spending API usage.
-            proc.kill()
+            # Give a transport adapter time to stop its Orca-owned terminal as well.
+            _end_process_group(proc, grace_s=35.0)
             pump.join(timeout=5)
             raise
         if "exc" in box:
@@ -369,7 +370,11 @@ class RealBackend:
         outage_waits = 0
         while attempt < self.agent_retries:
             rc, out, err = self._agent_turn(cmd, prompt, role)
+            if "FK_AGENT_UNCERTAIN" in err:
+                raise AgentError(err.strip())
             if rc == 0 and out.strip():
+                from forgekernel.workspace import sync_agent_workspace
+                sync_agent_workspace(self.workspace)
                 return out
             last = (f"rc={rc} "
                     f"stderr={err[-300:].strip()!r} stdout={out[-200:].strip()!r}")

@@ -110,6 +110,47 @@ cp local.env.example local.env
 #                      prompt) and REMOTE_WORKDIR (a directory on it)
 ```
 
+For **local agents with an SSH workspace**, set `FK_WORKSPACE_HOST` and `FK_WORKSPACE_DIR`
+in the local `local.env`. ForgeKernel, Orca, Codex and Grok all run and authenticate locally.
+The server needs only Bash, stdlib Python and the GPU evaluation environment, without agent
+installations or logins. `FK_WORKSPACE_ENV_FILE` optionally sources that remote GPU environment;
+`FK_WORKSPACE_PYTHON` selects the file-transfer interpreter (default `python3`). GPU delivery
+automatically uses the workspace host; `FK_GPU` selects its device.
+
+CLI commands and paths, including `export --out`, stay local. Working copies live under
+`.artifacts/<operator>/<run>/`; remote files are grouped as `<FK_WORKSPACE_DIR>/<operator>/<run>/`
+with `state/` for snapshots/reports, `ws/` for the agent's code mirror, and `jobs/<tree>/` for
+isolated GPU jobs. Successful turns synchronize code over SSH; run entry and exit synchronize
+state. Logs and verdicts return to the local controller. Git metadata, agent configuration,
+`local.env` and `*.local.toml` are excluded. Only controller-marked mirrors may be replaced.
+A sync failure preserves local files and stops without repeating an already successful turn.
+
+Teacher and student can use different harnesses through Orca:
+
+```toml
+[agent.teacher]
+backend = "codex"
+model = "default"
+effort = "high"
+
+[agent.student]
+backend = "grok"
+model = "default"
+```
+
+`default` uses the native CLI's model default; an explicit model is also supported. Both backends
+currently require `provider = "native"`. Install and authenticate Codex CLI and Grok Build CLI
+locally, with an Orca runtime running (`orca-ide` on Linux, or `ORCA_CLI_COMMAND`).
+`FK_ORCA_WORKSPACE` optionally selects an existing Orca workspace; otherwise the checkout is
+registered as a folder. Orca owns each headless turn's terminal; ForgeKernel passes prompts and
+collects final responses through private files, enforcing timeouts and closing only its own terminal.
+The existing Claude backend remains available. Codex uses a named permission profile; Grok uses
+a custom sandbox (Landlock and bubblewrap on Linux). Restricted Grok turns on macOS expose only
+`read_file`, `search_replace`, `grep` and `list_dir`; shell, web and subagents are unavailable,
+and the controller handles compilation, tests and SSH. Blackbox URL restrictions
+disable network and web search in the native adapters. Uncertain launch/cleanup outcomes stop retries
+and preserve the private turn directory for inspection.
+
 **3. Run the example task**: fuse a PyTorch RMSNorm (nine kernel launches a call) into one CuTe DSL
 kernel on a Blackwell GPU (set `arch = "sm90"` in `task.toml` for Hopper).
 

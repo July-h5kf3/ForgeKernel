@@ -83,7 +83,7 @@ LANGUAGES = ("cutedsl", "cuda")
 # The loop's own language name for each task language (forgekernel.loop.lang_mode).
 LOOP_LANGUAGE = {"cutedsl": "cutedsl", "cuda": "cuda-sol"}
 TIMINGS = ("device", "e2e")
-BACKENDS = ("claude",)
+BACKENDS = ("claude", "codex", "grok")
 ROLES = ("teacher", "student")
 MIN_INPUT_GROUPS = 3
 
@@ -369,12 +369,22 @@ def merge_config(base: dict, top: dict) -> dict:
             merged.pop("ratio", None)
             merged.pop("ms", None)
         if table == "agent":
+            if (body.get("backend") in ("codex", "grok")
+                    and body["backend"] != merged.get("backend") and "model" not in body):
+                merged["model"] = "default"
             for role in merged.values():
                 if isinstance(role, dict):
                     for k, v in body.items():
                         if not isinstance(v, dict):
                             role.pop(k, None)
         for k, v in body.items():
+            if table == "agent" and k in ROLES and isinstance(v, dict):
+                previous = merged.get(k, {})
+                old_backend = previous.get("backend", merged.get("backend")) \
+                    if isinstance(previous, dict) else merged.get("backend")
+                if (v.get("backend") in ("codex", "grok")
+                        and v["backend"] != old_backend and "model" not in v):
+                    v = {**v, "model": "default"}
             if isinstance(v, dict) and isinstance(merged.get(k), dict):
                 merged[k] = {**merged[k], **v}
             else:

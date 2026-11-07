@@ -100,7 +100,11 @@ def snapshot_digest(d: Path) -> str:
 
 def new_run(task, *, root: Path | None = None, machine=None, now=time.time) -> Run:
     """Create ``<root>/<task>_<id>/`` with the task snapshotted into it."""
-    root = Path(root) if root is not None else runs_root()
+    if root is None:
+        root = runs_root()
+        if machine is not None and machine.workspace:
+            root = root / task.name
+    root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%y%m%d-%H%M%S", time.localtime(now()))
     for _ in range(8):
@@ -126,6 +130,12 @@ def new_run(task, *, root: Path | None = None, machine=None, now=time.time) -> R
                      "host": machine.remote_host or None} if machine is not None else None),
         "status": STATUS_CREATED,
     }
+    if machine is not None and machine.workspace:
+        from forgekernel.workspace import SshWorkspace
+        rec["remote_workspace"] = {
+            "host": machine.remote_host,
+            "directory": SshWorkspace(machine.remote_host, machine.remote_workdir).run_dir(task.name, d.name),
+        }
     _write_json(d / RUN_FILE, rec)
     return Run(dir=d, task_name=task.name, id=rid)
 
@@ -156,7 +166,8 @@ def list_runs(root: Path | None = None) -> list[Run]:
     root = Path(root) if root is not None else runs_root()
     out = []
     if root.is_dir():
-        for d in sorted(root.iterdir()):
+        records = set(root.glob("*/run.json")) | set(root.glob("*/*/run.json"))
+        for d in sorted(p.parent for p in records):
             if (d / RUN_FILE).is_file():
                 try:
                     rec = json.loads((d / RUN_FILE).read_text(encoding="utf-8"))

@@ -99,6 +99,60 @@ cp local.env.example local.env
 #                      REMOTE_WORKDIR（主机上的一个目录）
 ```
 
+**本机 agent + SSH 远程 workspace。** ForgeKernel 控制器、Orca、Codex teacher 和 Grok student
+均在本机运行、登录。服务器只保存代码和产物、执行编译及 GPU 评测，不需要部署或登录 agent。
+在本机 `local.env` 中设置：
+
+```dotenv
+FK_WORKSPACE_HOST=zhiyuan-H800
+FK_WORKSPACE_DIR=/home/JSST/shared_workspace_mixq/ldc/forgekernel
+FK_WORKSPACE_ENV_FILE=/home/JSST/shared_workspace_mixq/ldc/ops_work/env.sh
+FK_WORKSPACE_PYTHON=python3
+```
+
+环境脚本和 Python 路径可选；配置 workspace 后自动使用同一主机进行 SSH GPU 作业交付，
+`FK_GPU` 指定远端卡号。所有 CLI 命令、任务路径和 `export --out` 仍属于本机。
+本机工作副本保存在 `.artifacts/<算子>/<运行>/`；远端按下面的结构隔离，每个算子一个目录：
+
+```text
+<FK_WORKSPACE_DIR>/<算子>/<运行>/
+  state/        任务快照、运行状态、报告和最优结果
+  ws/           本机 agent 工作副本的镜像
+  jobs/<树名>/  隔离的远端编译、正确性、计时和 NCU 作业
+```
+
+每个成功的 agent 回合后通过 SSH 同步代码，启动和结束运行时同步状态；GPU 作业由本机控制器
+提交，stdout、stderr 和判决保存在本机。`.git`、agent 配置目录、`local.env` 和
+`*.local.toml` 不上传；只替换带有控制器标记的镜像，拒绝覆盖未标记的已有目录。
+远端只需 Bash、Python 标准库及任务使用的 CUDA/PyTorch/NCU 环境，不需要 ForgeKernel 的 agent
+模块。同步失败会保留本机工作副本并停止，不重跑已成功的 agent 回合；可在本机查看状态和续跑。
+
+**teacher 用 Codex，student 用 Grok。** 在任务 `task.toml` 中添加：
+
+```toml
+[agent.teacher]
+backend = "codex"
+model = "default"
+effort = "high"
+
+[agent.student]
+backend = "grok"
+model = "default"
+```
+
+`default` 使用各 CLI 自身的默认模型，也可指定具体模型。两种 backend 目前仅支持
+`provider = "native"`。只需在本机安装并登录 Codex CLI、Grok Build CLI，并启动可用的 Orca
+runtime；Linux 本机的 CLI 名称为 `orca-ide`，或通过
+`ORCA_CLI_COMMAND` 指定。也可用 `FK_ORCA_WORKSPACE` 选择已有 Orca workspace。
+
+Orca 托管每次非交互回合，ForgeKernel 负责 prompt、milestone、GPU 反馈和最终回复的传递。
+每个回合有独立进程、超时和结果文件，结束时关闭自己的终端；不解析 TUI 文本。
+保留现有 Claude backend。Codex 使用命名权限配置；Grok 使用自定义 sandbox。Linux 本机需要
+支持 Landlock 的内核及 `bubblewrap` 来隔离参考路径。macOS 上受限 Grok 回合只提供
+`read_file/search_replace/grep/list_dir` 文件工具，关闭 shell、网页和子 agent；编译、测试及 SSH
+由本机控制器执行。黑盒任务声明了禁止访问的 URL 时，原生适配器关闭网络和网页搜索。
+启动或停止状态不明确时保留私有回合目录并停止重试，避免重复启动 agent。
+
 **3. 跑示例任务**：把 PyTorch 版 RMSNorm（每次调用 9 次 kernel launch）融合成一个 Blackwell 上
 的 CuTe DSL kernel（Hopper 上把 `task.toml` 里的 `arch` 改成 `"sm90"`）。
 
