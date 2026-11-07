@@ -17,7 +17,7 @@ from forgekernel.paths import repo_root
 KEYS = ("FK_WORKSPACE_HOST", "FK_WORKSPACE_DIR", "FK_WORKSPACE_ENV_FILE",
         "FK_WORKSPACE_PYTHON")
 CONTEXT_ENV = "FORGEKERNEL_REMOTE_WORKSPACE"
-_PRIVATE = {".git", ".claude", ".codex", ".grok", ".jobs", ".exec", "__pycache__"}
+_PRIVATE = {".git", ".claude", ".codex", ".grok", ".agents", ".jobs", ".exec", "__pycache__"}
 
 # Only marked, controller-owned mirrors can be replaced. A failed extraction
 # leaves the previous mirror intact. The receiver needs only Python's stdlib.

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from forgekernel import agents, orca_agent
+from forgekernel import agents, orca_agent, agy
 from forgekernel import task as task_module
 from forgekernel.loop.agent_policy import AgentPolicy
 from forgekernel.loop.cli import RealBackend
@@ -33,8 +33,8 @@ def test_task_routes_codex_teacher_and_grok_student(tmp_path):
         assert command[command.index("--role") + 1] == role
 
 
-@pytest.mark.parametrize("teacher", ("claude", "codex", "grok"))
-@pytest.mark.parametrize("student", ("claude", "codex", "grok"))
+@pytest.mark.parametrize("teacher", task_module.BACKENDS)
+@pytest.mark.parametrize("student", task_module.BACKENDS)
 def test_both_roles_choose_harness_model_effort_and_timeout_independently(tmp_path, teacher, student):
     task = load_task(_task(tmp_path, MINIMAL +
         f'[agent.teacher]\nbackend="{teacher}"\nmodel="teacher/custom-model"\n'
@@ -55,8 +55,8 @@ def test_both_roles_choose_harness_model_effort_and_timeout_independently(tmp_pa
             assert command[command.index("--timeout") + 1] == str(timeout)
 
 
-@pytest.mark.parametrize("before,after", [(a, b) for a in ("claude", "codex", "grok")
-                                         for b in ("claude", "codex", "grok") if a != b])
+@pytest.mark.parametrize("before,after", [(a, b) for a in task_module.BACKENDS
+                                         for b in task_module.BACKENDS if a != b])
 def test_changing_shared_harness_resets_both_roles_models_and_providers(tmp_path, monkeypatch, before, after):
     base = task_module.read_global_config([])
     base["agent"] = {"backend": before, "model": "old-model", "provider": "old-gateway",
@@ -90,14 +90,17 @@ def test_changing_harness_does_not_inherit_a_claude_model(tmp_path):
     assert shared.teacher.model == shared.student.model == "default"
 
 
-@pytest.mark.parametrize("agent,key", [("codex", "FK_CODEX_BIN"), ("grok", "FK_GROK_BIN")])
+@pytest.mark.parametrize("agent,key", [("codex", "FK_CODEX_BIN"), ("grok", "FK_GROK_BIN"),
+                                      ("agy", "FK_AGY_BIN")])
 def test_orca_worker_uses_the_callers_binary_override(tmp_path, agent, key):
+    if agent == "agy" and sys.platform != "darwin":
+        pytest.skip("AGY process isolation currently requires macOS")
     ws = tmp_path / "ws"
     ws.mkdir()
     policy = {"role": "teacher", "native": {}}
     argv = orca_agent.native_command({"agent": agent, "workspace": str(ws), "model": "default",
         "policy": policy, "env": {key: "/caller/bin/fixture"}}, tmp_path / "turn")
-    assert argv[0] == "/caller/bin/fixture"
+    assert "/caller/bin/fixture" in argv
 
 
 @pytest.fixture
@@ -143,15 +146,19 @@ print(json.dumps({"ok": True, "result": result}))
     fake_orca.chmod(0o755)
     fake_native = tmp_path / "fake-native"
     fake_native.write_text(f"#!{sys.executable}\n" + '''
-import os, sys
+import json, os, sys
 from pathlib import Path
 args = sys.argv[1:]
 if "exec" in args:
     prompt = sys.stdin.read()
     Path(args[args.index("--output-last-message") + 1]).write_text("codex final")
 else:
-    prompt = Path(args[args.index("--prompt-file") + 1]).read_text()
-    print("grok final")
+    if "--input-format" in args:
+        prompt = json.loads(sys.stdin.readline())["message"]["content"]
+        print(json.dumps({"event":"result","result":{"status":"SUCCESS","response":"agy final"}}))
+    else:
+        prompt = Path(args[args.index("--prompt-file") + 1]).read_text()
+        print("grok final")
 Path("kernel.py").write_text(prompt)
 Path("chosen-model.txt").write_text(args[args.index("--model") + 1] if "--model" in args else "default")
 assert os.environ["PRIVATE_TEST_TOKEN"] == "private-test-value"
@@ -162,13 +169,17 @@ assert os.environ["PRIVATE_TEST_TOKEN"] == "private-test-value"
     monkeypatch.setenv("PRIVATE_TEST_TOKEN", "private-test-value")
     monkeypatch.setenv("FK_CODEX_BIN", str(fake_native))
     monkeypatch.setenv("FK_GROK_BIN", str(fake_native))
+    monkeypatch.setenv("FK_AGY_BIN", str(fake_native))
     monkeypatch.delenv("ORCA_ENVIRONMENT", raising=False)
     monkeypatch.delenv("ORCA_PAIRING_CODE", raising=False)
     return ws, policy, state, fake_native
 
 
-@pytest.mark.parametrize("agent,role", [("codex", "teacher"), ("grok", "student")])
+@pytest.mark.parametrize("agent,role", [("codex", "teacher"), ("grok", "student"),
+                                       ("agy", "teacher"), ("agy", "student")])
 def test_orca_turn_edits_the_bound_workspace_and_returns_final_response(transport, agent, role):
+    if agent == "agy" and sys.platform != "darwin":
+        pytest.skip("AGY process isolation currently requires macOS")
     ws, policy, state, _ = transport
     policy.install(role, ws)
     rc, answer, error = orca_agent.run_turn(agent, role, "default", None, 10,
@@ -182,11 +193,14 @@ def test_orca_turn_edits_the_bound_workspace_and_returns_final_response(transpor
     assert sum(c[:2] == ["terminal", "create"] for c in parsed) == 1
     assert parsed[-1][:2] == ["terminal", "close"]
     assert not (ws / ".grok/sandbox.toml").exists()
+    assert not list((ws / ".agents/agents").glob("forgekernel_*.md"))
 
 
 @pytest.mark.parametrize("teacher_backend,student_backend", [
-    ("codex", "codex"), ("codex", "grok"), ("grok", "codex"), ("grok", "grok")])
+    (a, b) for a in ("codex", "grok", "agy") for b in ("codex", "grok", "agy")])
 def test_real_backend_routes_independent_harnesses_and_models(transport, teacher_backend, student_backend):
+    if "agy" in (teacher_backend, student_backend) and sys.platform != "darwin":
+        pytest.skip("AGY process isolation currently requires macOS")
     ws, policy, _, _ = transport
     teacher = agents.agent_command(AgentSpec(teacher_backend, "teacher-model", "high"), "teacher")
     student = agents.agent_command(AgentSpec(student_backend, "student-model", None), "student")
@@ -363,3 +377,89 @@ def test_claude_goal_accepts_native_default_but_checks_explicit_models_and_refus
     transcript = SimpleNamespace(locate=lambda: tmp_path / "transcript.jsonl", refusal=refusal,
                                  path=tmp_path / "transcript.jsonl", models={"served-default-model"})
     assert leg.model_verdict(transcript)[0] == code
+
+
+@pytest.mark.parametrize("output,returncode,expected", [
+    ('{"event":"result","result":{"status":"SUCCESS","response":"done"}}', 0, (0, "done", "")),
+    ('{"event":"result","result":{"status":"ERROR","response":"","error":"location unavailable"}}',
+     0, (1, "", "location unavailable")),
+    ('{"event":"init","init":{}}', 0, (1, "", "agy returned no terminal result event")),
+    ('{"event":"result","result":{"status":"SUCCESS","response":""}}',
+     0, (1, "", "agy exited unsuccessfully or returned an empty response")),
+])
+def test_agy_requires_a_successful_nonempty_terminal_result(output, returncode, expected):
+    assert agy.result(output, returncode) == expected
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS process sandbox")
+def test_agy_process_cannot_read_reference_or_write_outside_its_working_copy(tmp_path):
+    ws, turn = tmp_path / "ws", tmp_path / "turn"
+    ws.mkdir()
+    turn.mkdir()
+    secret = ws / "reference.txt"
+    secret.write_text("private reference")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    (turn / "request.json").write_text("private supervisor state")
+    args = agy.command({"workspace": str(ws), "model": "chosen", "effort": "high",
+        "policy": {"native": {"deny_read": [str(secret)]}}}, turn, {})
+    agent = agy.agent_file(ws, turn)
+    tools = json.loads(next(line[7:] for line in agent.read_text().splitlines() if line.startswith("tools: ")))
+    assert set(tools) == set(agy.FILE_TOOLS) and "run_command" not in tools
+    script = '''from pathlib import Path
+import sys
+ws, secret, outside, request, definition = map(Path, sys.argv[1:])
+(ws / "kernel.py").write_text("allowed")
+for path, mode in ((secret,"r"),(outside,"w"),(request,"r"),(definition,"w")):
+    try:
+        with path.open(mode): pass
+    except PermissionError: continue
+    raise AssertionError("sandbox allowed " + mode + " " + str(path))
+print("FILE_BOUNDARY_OK")
+'''
+    result = subprocess.run([*args[:3], sys.executable, "-c", script,
+                             str(ws), str(secret), str(outside), str(turn / "request.json"), str(agent)],
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0 and "FILE_BOUNDARY_OK" in result.stdout, result.stderr
+    assert outside.read_text() == "keep"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS process sandbox")
+def test_agy_preserves_existing_agent_definitions(transport):
+    ws, policy, _, _ = transport
+    policy.install("teacher", ws)
+    folder = ws / ".agents/agents"
+    folder.mkdir(parents=True)
+    personal = folder / "personal.md"
+    personal.write_text("existing user agent")
+    rc, answer, error = orca_agent.run_turn("agy", "teacher", "default", None, 10, "p")
+    assert rc == 0 and answer.strip() == "agy final", error
+    assert personal.read_text() == "existing user agent"
+    assert list(folder.iterdir()) == [personal]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS process sandbox")
+def test_agy_refuses_to_replace_an_existing_definition(tmp_path):
+    ws, turn = tmp_path / "ws", tmp_path / "turn"
+    definition = agy.agent_file(ws, turn)
+    definition.parent.mkdir(parents=True)
+    definition.write_text("existing user data")
+    with pytest.raises(FileExistsError):
+        agy.command({"workspace": str(ws), "model": "default", "policy": {"native": {}}}, turn, {})
+    agy.cleanup(ws, turn)
+    assert definition.read_text() == "existing user data"
+
+
+def test_agy_does_not_silently_drop_isolation_on_unsupported_platforms(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(ValueError, match="requires macOS sandbox-exec"):
+        agy.command({}, tmp_path / "turn", {})
+
+
+def test_agy_reference_generation_is_refused_before_launch(transport, monkeypatch):
+    ws, policy, state, _ = transport
+    policy.install("teacher", ws)
+    monkeypatch.setenv("FK_AGENT_DRIVER", "goal")
+    with pytest.raises(orca_agent.OrcaError, match="cannot drive reference-generation"):
+        orca_agent.run_turn("agy", "teacher", "default", None, 10, "p")
+    assert not (state / "calls.jsonl").exists()

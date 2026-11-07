@@ -380,6 +380,7 @@ class AgentPolicy:
         _git_exclude(workspace, ".claude/")
         _git_exclude(workspace, ".grok/")
         _git_exclude(workspace, ".codex/")
+        _git_exclude(workspace, ".agents/")
         return settings_path
 
 

@@ -1,4 +1,4 @@
-"""One headless Codex/Grok turn in an Orca-managed terminal.
+"""One headless Codex/Grok/AGY turn in an Orca-managed terminal.
 
 Orca owns the terminal; a small trusted worker owns stdin, the native process,
 timeout and an atomic result file. We never parse a TUI or treat an idle shell as
@@ -65,12 +65,15 @@ def native_command(spec: dict, turn: Path) -> list[str]:
     ws = Path(spec["workspace"])
     # Native agents cannot modify policy/config, or read the supervisor's credentials.
     deny = [*native.get("deny_read", []), str(turn / "request.json")]
-    protected = [str(ws / p) for p in (".claude", ".codex", ".grok")]
+    protected = [str(ws / p) for p in (".claude", ".codex", ".grok", ".agents")]
     read_only = [*native.get("deny_write", []), *protected]
     offline = bool(policy.get("offline") or policy.get("deny_urls"))
     shell_offline = offline or bool(policy.get("no_cluster"))
     agent = spec["agent"]
     model = [] if spec["model"] == "default" else ["--model", spec["model"]]
+    if agent == "agy":
+        from forgekernel.agy import command
+        return command(spec, turn, environment)
     if agent == "codex":
         fs = {"/": "read", str(ws): "write",
               **{p: "write" for p in native.get("allow_write", [])},
@@ -133,12 +136,16 @@ def worker(request: Path) -> int:
     try:
         argv = native_command(spec, turn)
         env = {**os.environ, **spec["env"]}
+        prompt = (turn / "prompt.txt").read_text()
+        if spec["agent"] == "agy":
+            env.update(AGY_CLI_DISABLE_AUTO_UPDATE="true", TMPDIR=str(turn / "tmp"))
+            prompt = json.dumps({"event": "user", "message": {"content": prompt}}) + "\n"
         with (turn / "stdout.txt").open("w") as out, (turn / "stderr.txt").open("w") as err:
             proc = subprocess.Popen(argv, cwd=spec["workspace"], env=env,
                                     stdin=subprocess.PIPE, stdout=out, stderr=err,
                                     text=True, start_new_session=True)
             try:
-                proc.communicate((turn / "prompt.txt").read_text(), timeout=spec["timeout"])
+                proc.communicate(prompt, timeout=spec["timeout"])
                 rc = proc.returncode
             except subprocess.TimeoutExpired:
                 _kill_session(proc)
@@ -146,6 +153,10 @@ def worker(request: Path) -> int:
                 rc, error = 124, "agent turn exceeded its timeout"
         reply = turn / ("reply.txt" if spec["agent"] == "codex" else "stdout.txt")
         answer = reply.read_text(encoding="utf-8") if reply.is_file() else ""
+        if spec["agent"] == "agy":
+            from forgekernel.agy import result
+            rc, answer, protocol_error = result(answer, rc)
+            error = error or protocol_error
         if rc == 0 and not answer.strip():
             rc, error = 1, "agent exited without a final response"
     except BaseException as e:
@@ -154,6 +165,9 @@ def worker(request: Path) -> int:
             proc.wait()
         answer, error = "", f"{type(e).__name__}: {e}"
     finally:
+        if spec["agent"] == "agy":
+            from forgekernel.agy import cleanup
+            cleanup(Path(spec["workspace"]), turn)
         if spec["agent"] == "grok" and sandbox.is_file():
             if previous_sandbox is None:
                 sandbox.unlink()
@@ -176,6 +190,9 @@ def run_turn(agent: str, role: str, model: str, effort: str | None,
         raise OrcaError("native agent policy is missing; reinstall the ForgeKernel role policy")
     if policy.get("role") != role and os.environ.get("FK_AGENT_DRIVER") != "goal":
         raise OrcaError("agent policy role does not match this turn")
+    if agent == "agy" and os.environ.get("FK_AGENT_DRIVER") == "goal":
+        raise OrcaError("agy file-only turns cannot drive reference-generation commands; "
+                        "provide a reference or choose a teacher with shell tools")
     if (agent == "grok" and sys.platform == "darwin"
             and (policy.get("offline") or policy.get("no_cluster") or policy.get("deny_urls"))):
         prompt = ("This turn exposes file tools only. Edit the local kernel and probe files; "
@@ -265,7 +282,7 @@ def run_turn(agent: str, role: str, model: str, effort: str | None,
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--worker", type=Path)
-    p.add_argument("--agent", choices=("codex", "grok"))
+    p.add_argument("--agent", choices=("codex", "grok", "agy"))
     p.add_argument("--role", choices=("teacher", "student"))
     p.add_argument("--model", default="default")
     p.add_argument("--effort")

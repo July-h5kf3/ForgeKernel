@@ -126,7 +126,7 @@ state. Logs and verdicts return to the local controller. Git metadata, agent con
 A sync failure preserves local files and stops without repeating an already successful turn.
 
 Teacher and student choose their harness and model independently. Each role supports `claude`,
-`codex`, or `grok`, including the same harness with different models or reversed roles.
+`codex`, `grok`, or `agy`, including the same harness with different models or reversed roles.
 `backend` selects the harness; `model` is forwarded unchanged to its CLI without a ForgeKernel
 model allowlist. Model availability depends on that CLI and account. One example is:
 
@@ -141,12 +141,12 @@ backend = "grok"
 model = "default"
 ```
 
-`default` uses the CLI's model default for all three harnesses. Changing `backend` resets an
+`default` uses the CLI's model default for all four harnesses. Changing `backend` resets an
 unspecified `model`/`provider` to `default`/`native`, avoiding another harness's inherited model
 or endpoint. `effort` and `timeout_s` can also differ by role; task role settings override task
-common settings, which override global settings. Codex and Grok currently require
-`provider = "native"`. Install and authenticate only the selected CLIs locally. Codex and
-Grok require a local Orca runtime (`orca-ide` on Linux, or `ORCA_CLI_COMMAND`); Claude keeps
+common settings, which override global settings. Codex, Grok and AGY currently require
+`provider = "native"`. Install and authenticate only the selected CLIs locally. Codex, Grok
+and AGY require a local Orca runtime (`orca-ide` on Linux, or `ORCA_CLI_COMMAND`); Claude keeps
 its existing direct CLI launcher.
 `FK_ORCA_WORKSPACE` optionally selects an existing Orca workspace; otherwise the checkout is
 registered as a folder. Orca owns each headless turn's terminal; ForgeKernel passes prompts and
@@ -157,6 +157,17 @@ a custom sandbox (Landlock and bubblewrap on Linux). Restricted Grok turns on ma
 and the controller handles compilation, tests and SSH. Blackbox URL restrictions
 disable network and web search in the native adapters. Uncertain launch/cleanup outcomes stop retries
 and preserve the private turn directory for inspection.
+
+`backend = "agy"` selects Antigravity CLI for either role. Query model IDs with `agy models`,
+or select `model = "default"`; `FK_AGY_BIN` overrides its executable. The AGY adapter currently
+requires macOS `sandbox-exec`. It exposes file tools and enforces role read/write boundaries
+at process level, with necessary temporary/CLI-state paths allowed and global permissions
+unchanged; compilation, tests and SSH stay in the
+controller. Other platforms fail explicitly. Native authentication, model and account-eligibility
+errors remain failures. `.agents/` definitions are excluded from SSH mirrors and no AGY install
+is required on the GPU server.
+File-only AGY turns cannot drive reference generation for tasks without a reference. Provide
+a reference or select another teacher for that phase; the student may still use AGY.
 
 **3. Run the example task**: fuse a PyTorch RMSNorm (nine kernel launches a call) into one CuTe DSL
 kernel on a Blackwell GPU (set `arch = "sm90"` in `task.toml` for Hopper).

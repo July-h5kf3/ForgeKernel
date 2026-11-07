@@ -91,7 +91,7 @@ def test_sync_removes_stale_files_and_never_transfers_agent_credentials(tmp_path
     local.mkdir()
     (local / "kernel.py").write_text("version 1")
     (local / "stale.py").write_text("old")
-    for name in (".git", ".codex", ".grok", ".claude"):
+    for name in (".git", ".codex", ".grok", ".claude", ".agents"):
         (local / name).mkdir()
         (local / name / "auth.json").write_text("secret")
     (local / "submit.local.toml").write_text('FK_REF_KEY="secret"')

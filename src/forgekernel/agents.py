@@ -1,7 +1,7 @@
 """Agent commands from a task's ``[agent]`` (merged per role: forgekernel.task).
 
 The task names backend, provider, model, effort and timeout. Claude uses
-scripts/agent-claude.sh; Codex and Grok use headless turns in Orca-owned terminals.
+scripts/agent-claude.sh; Codex, Grok and AGY use headless turns in Orca-owned terminals.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ def agent_command(spec, role: str, env: dict | None = None) -> str:
     """The shell command the loop runs for one ``role`` turn (prompt on stdin). A provider
     other than ``native`` rides as environment assignments in front of it: the endpoint and
     the name of the variable that holds the key, never the key."""
-    if spec.backend in ("codex", "grok"):
+    if spec.backend in ("codex", "grok", "agy"):
         provider_mod.grant(spec.backend, spec.provider, env)
         argv = [sys.executable, "-m", "forgekernel.orca_agent", "--agent", spec.backend,
                 "--role", role, "--model", spec.model, "--timeout", str(spec.timeout_s)]
