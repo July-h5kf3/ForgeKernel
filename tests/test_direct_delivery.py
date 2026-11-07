@@ -226,6 +226,7 @@ def test_ssh_run_syncs_the_tree_then_runs_under_the_host_gpu_lock(tmp_path):
     tree = f"/data/fk/{tmp_path.name}/op"
     (argv, payload), = fake.runs
     assert argv[0] == "ssh" and "box" in argv and f"tar xJ -C {tree}" in argv[-1]
+    assert "--no-same-owner" in argv[-1]  # root-squashed shared workspaces cannot chown
     assert payload[:6] == b"\xfd7zXZ\x00"              # xz-compressed git archive
     remote = fake.execs[0][-1]
     assert remote.startswith(f"cd {tree}") and ". /opt/env.sh" in remote
@@ -255,6 +256,26 @@ def test_ssh_payload_failure_is_charged_without_retry(tmp_path):
     status, log = _ssh_run(cfg, fake)
     assert status == ds.STATUS_FAILED and "exited rc=1" in log
     assert ds.TRANSPORT_ERROR_MARKER not in log and len(fake.execs) == 1
+
+
+def test_environment_script_cannot_change_the_job_working_directory(tmp_path):
+    cfg = _ssh_cfg(tmp_path)
+    cfg.exec_workdir = str(tmp_path / "remote")
+    environment = tmp_path / "env.sh"
+    environment.write_text("cd /tmp\n")
+    cfg.exec_env_file = str(environment)
+    tree = Path(direct.remote_tree(cfg))
+    tree.mkdir(parents=True)
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    probe = tools / "setsid"
+    probe.write_text("#!/bin/sh\npwd\n")
+    probe.chmod(0o755)
+    import os
+    result = subprocess.run(["sh", "-c", direct.DirectRunner(cfg)._exec_cmd("perf")],
+                            capture_output=True, text=True,
+                            env={**os.environ, "PATH": str(tools) + ":" + os.environ["PATH"]})
+    assert result.returncode == 0 and result.stdout.splitlines()[-1] == str(tree)
 
 
 # -- the submit facade ----------------------------------------------------------------------

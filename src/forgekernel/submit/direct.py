@@ -89,6 +89,8 @@ def remote_tree(cfg: SubmitConfig) -> str:
     """``<workdir>/<run>/<op>``: one tree per op and run, so concurrent runs on one host
     never share a directory."""
     op_dir = Path(cfg.op_dir)
+    if cfg.exec_workspace:
+        return f"{cfg.exec_workspace.rstrip('/')}/jobs/{op_dir.name}"
     run = op_dir.parents[1].name if len(op_dir.parents) > 1 else "repo"
     return f"{cfg.exec_workdir.rstrip('/')}/{run}/{op_dir.name}"
 
@@ -175,7 +177,7 @@ class DirectRunner:
 
     def _extract_cmd(self) -> str:
         d = shlex.quote(remote_tree(self.cfg))
-        return f"rm -rf {d} && mkdir -p {d} && tar xJ -C {d}"
+        return f"rm -rf {d} && mkdir -p {d} && tar xJ -C {d} --no-same-owner"
 
     def _exec_cmd(self, mode: str) -> str:
         env = _job_env(self.cfg)
@@ -183,6 +185,7 @@ class DirectRunner:
         parts = [f"cd {shlex.quote(remote_tree(self.cfg))}"]
         if self.cfg.exec_env_file:
             parts.append(f". {shlex.quote(self.cfg.exec_env_file)}")
+            parts.append(f"cd {shlex.quote(remote_tree(self.cfg))}")
         parts += [f"export {k}={shlex.quote(str(v))}" for k, v in sorted(env.items())
                   if k not in secrets]
         # a secret is read off stdin, never spelled on a command line `ps` shows

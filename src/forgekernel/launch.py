@@ -44,6 +44,7 @@ from pathlib import Path
 from forgekernel import judge as judge_mod
 from forgekernel import runs as runs_mod
 from forgekernel import taskcard
+from forgekernel import workspace as workspace_mod
 from forgekernel.agents import agent_command
 from forgekernel.localenv import MachineError, load_machine
 from forgekernel.paths import OPERATORS_ENV, repo_root
@@ -162,13 +163,15 @@ def describe(task, machine) -> str:
               + (f", {task.budget.reference_hours:g} h to write the reference"
                  if task.mode == MODE_GENERATE else ""),
               f"  GPU: {machine.describe()}"]
+    if machine.workspace:
+        lines.append(f"  agents: this machine; SSH workspace: {machine.remote_workdir}/{task.name}/<run>")
     lines += [f"  note: {n}" for n in task.notes]
     return "\n".join(lines)
 
 
 def _agent_line(spec) -> str:
     extra = [x for x in (spec.effort, None if spec.provider == "native" else spec.provider) if x]
-    return spec.model + (f" ({', '.join(extra)})" if extra else "")
+    return f"{spec.backend}/{spec.model}" + (f" ({', '.join(extra)})" if extra else "")
 
 
 def _check_providers(task, machine) -> None:
@@ -198,6 +201,12 @@ def cmd_new(argv) -> int:
     if args.dry_run:
         return 0
     run = new_run(task, machine=machine)
+    try:
+        workspace_mod.sync_run(run, machine)
+    except workspace_mod.WorkspaceError as e:
+        run.update(error=str(e))
+        sys.stderr.write(f"[forge] {e}; local run preserved at {run.dir}\n")
+        return 2
     _say(f"run directory {run.dir}: `forge run {_shown(run.dir)}` runs it")
     return 0
 
@@ -223,7 +232,11 @@ def cmd_run(argv) -> int:
         sys.stderr.write(f"[forge] {e}\n")
         return 2
     started = run.record().get("status") != runs_mod.STATUS_CREATED
-    return drive(run, machine, resuming=started)
+    try:
+        return drive(run, machine, resuming=started)
+    except workspace_mod.WorkspaceError as e:
+        sys.stderr.write(f"[forge] {e}\n")
+        return 2
 
 
 def cmd_status(argv) -> int:
@@ -299,29 +312,44 @@ def _entered(run, machine):
     """While the run is driven, this process and everything it starts work on the run's
     trees with local.env's credentials, and its output goes to run.log as well; both are
     put back afterwards."""
-    saved_env = {k: os.environ.get(k) for k in [OPERATORS_ENV, *machine.env]}
+    context = workspace_mod.run_context(run, machine)
+    saved_env = {k: os.environ.get(k) for k in [OPERATORS_ENV, workspace_mod.CONTEXT_ENV, *machine.env]}
     saved_out, saved_err = sys.stdout, sys.stderr
     os.environ[OPERATORS_ENV] = str(run.operators_dir)
     for k, v in machine.env.items():
         if v:       # an empty KEY= line (local.env.example) must not blank a login
             os.environ.setdefault(k, v)
+    if context:
+        os.environ[workspace_mod.CONTEXT_ENV] = json.dumps(context)
+    else:
+        os.environ.pop(workspace_mod.CONTEXT_ENV, None)
     if not isinstance(sys.stdout, _Tee):
         sys.stdout = _Tee(sys.stdout, run.log)
         sys.stderr = _Tee(sys.stderr, run.log)
+    entered = False
     try:
+        workspace_mod.sync_run(run, machine)
+        entered = True
         yield
     finally:
-        if sys.stdout is not saved_out:
+        failed = sys.exc_info()[0] is not None
+        try:
             sys.stdout.flush()
-            sys.stdout = saved_out
-        if sys.stderr is not saved_err:
             sys.stderr.flush()
-            sys.stderr = saved_err
-        for k, v in saved_env.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+            try:
+                if entered:
+                    workspace_mod.sync_run(run, machine)
+            except workspace_mod.WorkspaceError as e:
+                if not failed:
+                    raise
+                sys.stderr.write(f"[forge] final workspace sync failed: {e}\n")
+        finally:
+            sys.stdout, sys.stderr = saved_out, saved_err
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 def deny_paths(run, task) -> list[str]:
@@ -342,7 +370,9 @@ def deny_paths(run, task) -> list[str]:
         src = Path(run.record().get("task_source", ""))
         if (src / taskcard.BOARD_DIR).is_dir():
             out.append(str(src / taskcard.BOARD_DIR))
-    for other in runs_mod.list_runs(run.dir.parent):
+    runs_directory = (run.dir.parent.parent if run.record().get("remote_workspace")
+                      else run.dir.parent)
+    for other in runs_mod.list_runs(runs_directory):
         if other.dir != run.dir:
             out.append(str(other.dir))
     return list(dict.fromkeys(out))

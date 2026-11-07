@@ -285,7 +285,12 @@ def write_submit(tree: Path, task, machine, timeout: int = JOB_TIMEOUT_S) -> Pat
         "[exec]", f'host = {json.dumps(machine.remote_host)}',
         f'workdir = {json.dumps(machine.remote_workdir)}',
         f'env_file = {json.dumps(machine.remote_env_file)}', f'gpu = "{machine.gpu}"',
-        "[env]", 'PYTHONUNBUFFERED = "1"',
+    ]
+    if machine.workspace:
+        from forgekernel.workspace import SshWorkspace
+        remote = SshWorkspace(machine.remote_host, machine.remote_workdir)
+        lines.append(f'workspace = {json.dumps(remote.run_dir(task.name, tree.parents[1].name))}')
+    lines += ["[env]", 'PYTHONUNBUFFERED = "1"',
         f'CUTE_DSL_ARCH = "{CUTE_ARCH.get(task.arch, task.arch + "a")}"',
     ]
     p = Path(tree) / "submit.toml"

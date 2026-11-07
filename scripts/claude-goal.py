@@ -5,6 +5,8 @@
       prompt on stdin, reply on stdout — the contract of scripts/agent-claude.sh,
       which dispatches here directly when its caller asks for a goal session
       (FK_AGENT_DRIVER=goal; today the ref_from_goal session, loop/goal_ref.py).
+      With both model arguments set to "default", use the CLI's configured model
+      and record its served model instead of pinning a specific model ID.
 
 What changes against `claude -p`: the turn is an interactive session in its own tmux
 session, started with `/goal <condition>` as its first prompt. After every model turn
@@ -608,7 +610,10 @@ class GoalLeg:
             say(f"seeded first-run answers in {', '.join(seeded)}", self.turn_dir)
         if self.dropped:
             say(f"dropped -p-only args {self.dropped}", self.turn_dir)
-        argv = [self.claude, "--model", self.flag, *self.extra]
+        argv = [self.claude]
+        if self.flag != "default":
+            argv += ["--model", self.flag]
+        argv += self.extra
         argv += ["--resume", self.sid] if resume else ["--session-id", self.sid]
         argv += ["--append-system-prompt-file", str(self.turn_dir / "prompt.md"),
                  "/goal " + self.spec["condition"]]
@@ -836,6 +841,8 @@ class GoalLeg:
                         f"{r['fallback']}. This is NOT a channel mix-up: the refusal belongs to "
                         f"the input. Files this turn had read: {' '.join(r['read']) or 'none'}. "
                         f"(transcript {tr.path})")
+        if self.expected == "default" and tr.models:
+            return 0, ""
         expected = {self.expected, self.expected + "[1m]"}
         foreign = sorted(m for m in tr.models if m not in expected)
         if foreign or not (tr.models & expected):

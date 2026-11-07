@@ -128,7 +128,7 @@ def test_every_problem_is_reported_at_once(tmp_path):
     toml = ('[task]\nlanguage = "triton"\narch = "h100"\n'
             '[target]\nratio = 1.5\nms = 0.2\ntiming = "wall"\n'
             '[budget]\nhours = 0\nmax_meta = -1\n'
-            '[agent.student]\nbackend = "codex"\n'
+            '[agent.student]\nbackend = "unknown-agent"\n'
             '[extra]\nx = 1\n')
     with pytest.raises(TaskError) as e:
         load_task(_task(tmp_path, toml, shapes=False, description=None), kb_root=_kb(tmp_path))
