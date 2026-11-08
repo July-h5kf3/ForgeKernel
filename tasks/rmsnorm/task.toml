@@ -9,6 +9,7 @@ arch     = "sm100"                   # sm90 for Hopper
 [reference]
 run    = "reference/run.py:run"      # the callable timed beside the kernel
 source = "reference"                 # the teacher may read it (source mode)
+reconnaissance = false               # eager PyTorch: use source and the measured baseline
 
 [budget]
 hours    = 2

@@ -12,6 +12,7 @@ arch     = "sm100"                   # the target GPU (sm90, sm100, ...)
 # run    = "reference/run.py:run"    # the callable timed beside the kernel; same signature
 # source = "reference"               # the teacher may read this; omit it for a black box
 # blackbox = true                    # withhold the source anyway
+# reconnaissance = false             # source mode: use a compact brief and the measured baseline
 # deny   = []                        # extra paths no agent may read
 # deny_urls    = []                  # its repositories on the web ("github.com/org/RefLib")
 # deny_modules = []                  # its package installed on the GPU machine: no probe

@@ -286,6 +286,7 @@ class LoopContext:
     # that distillation needs" — the loop would start against whatever milestone
     # happened to be on disk.
     oracle_mode: str = "source"
+    source_brief: str = ""  # task description for compact source and baseline distillation
     recon_path: Path | None = None  # the reconnaissance report distilled from (blackbox
                                     # always; a source-mode run that wired a recon tree)
     recon_dir: Path | None = None   # the teacher-only tree recon scripts are written into
@@ -697,6 +698,7 @@ def _bindings(ctx: LoopContext) -> dict[str, str]:
         "{PROVENANCE_DIR}": str(lang_mode.provenance_dir(repo_root, ctx.language)),
         "{META_TRAJECTORY_PATH}": str(ctx.meta_status_path) if ctx.meta_status_path else "(none)",
         "{ORACLE}": _oracle_binding(ctx),
+        "{SOURCE_BRIEF}": ctx.source_brief,
         "{RECON_REPORT}": (str(ctx.recon_path) if ctx.recon_path
                            else "(no reconnaissance report)"),
         "{CANDIDATES_PATH}": (str(ctx.recon_path.parent / "candidates.md")
@@ -11207,12 +11209,11 @@ def _source_recon_distill_addendum(ctx: LoopContext) -> str:
 def _distill_prompt_path(ctx: LoopContext) -> Path:
     """Which distillation brief the teacher gets.
 
-    The source-mode prompt is left untouched rather than branched inside, because the
-    control run has to use the same instructions it would have used without this
-    experiment existing. A single prompt carrying "if you have source ... otherwise ..."
-    would differ from the status quo for both modes, and then the comparison is against
-    something nobody ever ran.
+    Keep the full source and blackbox prompts for runs that use deep reconnaissance.
+    A source task can explicitly supply its description for the compact brief.
     """
+    if ctx.oracle_mode == "source" and ctx.source_brief:
+        return ctx.meta_dir / "distill_source_brief.md"
     if ctx.oracle_mode == "blackbox":
         p = _meta_prompt(ctx, "distill_blackbox_prompt.md")
         if p.exists():

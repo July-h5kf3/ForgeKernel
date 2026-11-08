@@ -256,6 +256,16 @@ def test_other_runs_are_denied(repo):
     assert str(run_b.dir) in launch.deny_paths(run_a, task_a)
 
 
+def test_source_brief_keeps_baseline_and_disables_deep_reconnaissance(repo):
+    run, task, check = _run_with_check(repo, toml=REF_TOML + "reconnaissance = false\n")
+    op_dir = taskcard.write_card(run, task, check, load_machine(repo, environ={}))
+    cfg = tomllib.loads(taskcard.write_loop_toml(run, task, op_dir, deny=[]).read_text())["loop"]
+    assert cfg["recon_op"] == cfg["ref_price_op"] == ""
+    assert cfg["ref_submit_op"] == cfg["arch_ref_submit_op"] == "_rmsnormref"
+    assert cfg["ref_in_job"] is True
+    assert Path(cfg["source_brief_file"]).read_text() == task.description
+
+
 # -- forge run, end to end with stand-ins ---------------------------------------------------
 
 

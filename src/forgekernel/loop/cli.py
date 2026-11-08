@@ -2445,6 +2445,7 @@ def _main(argv: list[str] | None = None) -> int:
     # census) are the only loop.toml knobs left: `forge run` turns them off on a machine
     # whose counters cannot be read, and a leaderboard card turns the timeline probe on.
     lc = cfg.get("loop", {})
+    source_brief_file = lc.get("source_brief_file")
     ctx = LoopContext(
         op=args.op, workspace=workspace, milestone=milestone, kb_dir=kb_root,
         status_path=status_path, meta_dir=root / "meta", kernel_file=kernel_file,
@@ -2456,6 +2457,7 @@ def _main(argv: list[str] | None = None) -> int:
         deadline_epoch=time.time() + args.hours * 3600, backend=backend, now=time.time,
         decisions_dag=[],  # empty -> the driver parses the milestone §4 DAG per meta step
         oracle_path=oracle, oracle_mode=oracle_mode,
+        source_brief=Path(source_brief_file).read_text(encoding="utf-8") if source_brief_file else "",
         recon_backend=recon_backend, recon_dir=recon_dir, recon_path=recon_path,
         max_probe_rounds=MAX_PROBE_ROUNDS,
         kb_tripwire_rounds=KB_TRIPWIRE_ROUNDS,

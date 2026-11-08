@@ -28,7 +28,7 @@ from pathlib import Path
 from forgekernel import leaderboard as lbmod
 from forgekernel import sealref
 from forgekernel.paths import template_dir
-from forgekernel.task import MODE_BLACKBOX, MODE_GENERATE, toml_value
+from forgekernel.task import DESCRIPTION_FILE, MODE_BLACKBOX, MODE_GENERATE, toml_value
 
 SUITE = "forgekernel"
 PROBLEM = lbmod.PROBLEM_FILE                     # eval/leaderboard/problem.json
@@ -326,14 +326,17 @@ def write_loop_toml(run, task, op_dir: Path, *, deny: list[str], ncu: bool = Tru
         ]
     else:
         rt = ref_tree(task.name)
+        recon = rt if task.reference.reconnaissance else ""
         name = f"the task's reference ({task.reference.run_file.name}:{task.reference.run_fn})"
         lines += [
             f'oracle_mode = "{"blackbox" if task.mode == MODE_BLACKBOX else "source"}"',
         ]
         if task.mode != MODE_BLACKBOX:
             lines.append(f"oracle      = {json.dumps(str(_snapshot_path(run, task, task.reference.source)))}")
+            if not recon:
+                lines.append(f"source_brief_file = {toml_value(str(run.task_dir / DESCRIPTION_FILE))}")
         lines += [
-            f'recon_op           = "{rt}"',
+            f'recon_op           = "{recon}"',
             'ref_mode           = "sealref"',
             f'ref_submit_op      = "{rt}"',
             "ref_in_job         = true",
@@ -343,7 +346,7 @@ def write_loop_toml(run, task, op_dir: Path, *, deny: list[str], ncu: bool = Tru
             'arch_ref_mode      = "sealref"',
             f'arch_ref_submit_op = "{rt}"',
             f"arch_ref_name      = {json.dumps(name)}",
-            f'ref_price_op       = "{rt}"',
+            f'ref_price_op       = "{recon}"',
             'ref_price_app      = ["python3", "sealref.py", "ncu"]',
             'ref_from_goal      = "off"',
         ]

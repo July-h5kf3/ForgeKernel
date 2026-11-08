@@ -112,6 +112,13 @@ def test_blackbox_flag_withholds_a_source_on_disk(tmp_path):
     assert t.mode == task_mod.MODE_BLACKBOX
 
 
+@pytest.mark.parametrize("extra", ['reconnaissance = "false"\n',
+                                  'blackbox = true\nreconnaissance = false\n'])
+def test_reconnaissance_opt_out_requires_source_and_a_boolean(tmp_path, extra):
+    with pytest.raises(TaskError, match=r"\[reference\] reconnaissance"):
+        load_task(_task(tmp_path, WITH_REF + extra, files=REF_FILES), kb_root=_kb(tmp_path))
+
+
 def test_cuda_language_maps_to_the_loop_language(tmp_path):
     toml = '[task]\nlanguage = "cuda"\narch = "sm100"\n'
     t = load_task(_task(tmp_path, toml), kb_root=_kb(tmp_path))

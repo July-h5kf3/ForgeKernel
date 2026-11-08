@@ -19,6 +19,7 @@
     run    = "reference/run.py:run" # the callable the harness times and checks against
     source = "reference/src"        # given: the teacher reads it (source mode); omitted: blackbox
     # blackbox = true               # source on disk, withheld from the teacher anyway
+    # reconnaissance = false       # source mode: distill from source and the measured baseline
     # deny = ["/path/to/other/impl"]# extra paths no agent may read
     # deny_urls = ["github.com/org/RefLib"]  # its repositories on the web, refused to agents
     # deny_modules = ["reflib"]     # its package as installed on the GPU machine: no probe
@@ -108,7 +109,7 @@ _MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 # Every key each table may hold; anything else is a mistake, not an extension point.
 _KEYS = {
     "task": {"language", "arch"},
-    "reference": {"run", "source", "blackbox", "deny", "deny_urls", "deny_modules"},
+    "reference": {"run", "source", "blackbox", "reconnaissance", "deny", "deny_urls", "deny_modules"},
     "target": {"ratio", "ms", "timing"},
     "agent.role": {"backend", "provider", "model", "effort", "timeout_s"},
     "budget": {"hours", "max_meta", "reference_hours"},
@@ -158,6 +159,7 @@ class Reference:
     deny: tuple = ()      # absolute paths
     deny_urls: tuple = ()     # URL fragments of the reference's repositories
     deny_modules: tuple = ()  # its package names as installed on the GPU machine
+    reconnaissance: bool = True  # false uses a compact brief over the source and baseline
 
     @property
     def run(self) -> str:
@@ -616,6 +618,11 @@ def _read_reference(d: Path, cfg: dict, problems: list[str]) -> Reference | None
     if not isinstance(blackbox, bool):
         problems.append(f"[reference] blackbox must be true or false, got {blackbox!r}")
         blackbox = False
+    reconnaissance = r.get("reconnaissance", True)
+    if not isinstance(reconnaissance, bool):
+        problems.append("[reference] reconnaissance must be true or false")
+    elif not reconnaissance and (blackbox or source is None):
+        problems.append("[reference] reconnaissance = false requires a readable source reference")
     deny_raw = r.get("deny", [])
     deny: list[Path] = []
     if not isinstance(deny_raw, list) or not all(isinstance(x, str) and x for x in deny_raw):
@@ -639,7 +646,7 @@ def _read_reference(d: Path, cfg: dict, problems: list[str]) -> Reference | None
         return None
     return Reference(run_file=run_file, run_fn=run_fn, source=source, blackbox=blackbox,
                      deny=tuple(deny), deny_urls=tuple(u.strip() for u in deny_urls),
-                     deny_modules=tuple(deny_modules))
+                     deny_modules=tuple(deny_modules), reconnaissance=reconnaissance)
 
 
 def _positive(v: object) -> bool:

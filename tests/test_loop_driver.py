@@ -1497,7 +1497,8 @@ def test_distill_refuses_without_a_ref_baseline(tmp_path):
     assert not be.prompts, "no agent should be spawned without a baseline"
 
 
-def test_distill_prompt_carries_the_measured_baseline(tmp_path):
+@pytest.mark.parametrize("compact", [False, True])
+def test_distill_prompt_carries_the_measured_baseline(tmp_path, compact):
     """The teacher can only anchor gates to numbers it is actually given."""
     from forgekernel.loop.driver import run_distill_step
     ms = tmp_path / "distilled.md"
@@ -1507,10 +1508,14 @@ def test_distill_prompt_carries_the_measured_baseline(tmp_path):
     ctx.milestone = ms
     ctx.oracle_path = tmp_path / "oracle.cu"
     ctx.oracle_path.write_text("// oracle", encoding="utf-8")
-    run_distill_step(ctx)
+    if compact:
+        ctx.source_brief = "Compute a normalized row in FP32."
+        ctx.arch_baseline = _REF
+    assert not run_distill_step(ctx).milestone_violations
     prompt = be.prompts[0]
     assert "2.0 ms" in prompt and "633122" in prompt      # the measured ref + its job
     assert "tensor_pct: 61.0" in prompt                    # its NCU signature
+    assert ("Compute a normalized row in FP32." in prompt) == compact
 
 
 def test_needs_authoring_false_without_oracle(tmp_path):
