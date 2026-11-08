@@ -59,8 +59,12 @@ def _toml_table(values: dict) -> str:
 
 def native_command(spec: dict, turn: Path) -> list[str]:
     """Translate the same role policy to each harness; never silently drop it."""
-    policy = spec["policy"]
     environment = {**os.environ, **spec.get("env", {})}
+    agent = spec["agent"]
+    if agent == "agy":
+        from forgekernel.agy import command
+        return command(spec, turn, environment)
+    policy = spec["policy"]
     native = policy.get("native", {})
     ws = Path(spec["workspace"])
     # Native agents cannot modify policy/config, or read the supervisor's credentials.
@@ -69,11 +73,7 @@ def native_command(spec: dict, turn: Path) -> list[str]:
     read_only = [*native.get("deny_write", []), *protected]
     offline = bool(policy.get("offline") or policy.get("deny_urls"))
     shell_offline = offline or bool(policy.get("no_cluster"))
-    agent = spec["agent"]
     model = [] if spec["model"] == "default" else ["--model", spec["model"]]
-    if agent == "agy":
-        from forgekernel.agy import command
-        return command(spec, turn, environment)
     if agent == "codex":
         fs = {"/": "read", str(ws): "write",
               **{p: "write" for p in native.get("allow_write", [])},
@@ -226,6 +226,8 @@ def run_turn(agent: str, role: str, model: str, effort: str | None,
                    f"export PYTHONPATH={shlex.quote(str(repo_root() / 'src'))} && exec " + command)
         handle = None
         completed = False
+        exited = False
+        result_path = turn / "result.json"
         try:
             try:
                 settled = False
@@ -240,25 +242,23 @@ def run_turn(agent: str, role: str, model: str, effort: str | None,
                 # A create with a lost reply may already have run the command.
                 raise OrcaError(f"{UNCERTAIN}: terminal launch outcome unknown: {e}") from e
             deadline = time.monotonic() + timeout + 60
-            while not (turn / "result.json").exists():
+            while not result_path.is_file():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise OrcaError("Orca worker did not return a result before its deadline")
-                _orca("terminal", "wait", "--terminal", handle, "--for", "exit",
-                      "--timeout-ms", str(max(1, min(1000, int(remaining * 1000)))), timeout=10)
-                if not (turn / "result.json").exists():
-                    info = _orca("terminal", "read", "--terminal", handle)
-                    if info.get("terminal", {}).get("status") == "exited":
-                        raise OrcaError("Orca worker exited without a result; check its terminal log")
-            result = json.loads((turn / "result.json").read_text())
+                observed = _orca("terminal", "wait", "--terminal", handle, "--for", "exit",
+                                 "--timeout-ms", str(max(1, min(1000, int(remaining * 1000)))), timeout=10)
+                exited = observed.get("wait", {}).get("satisfied") is True
+                if exited and not result_path.is_file():
+                    raise OrcaError("Orca worker exited without a result; check its terminal log")
+            result = json.loads(result_path.read_text())
             completed = True
             stderr = (turn / "stderr.txt").read_text() if (turn / "stderr.txt").is_file() else ""
             return result["returncode"], result["answer"], result["error"] + "\n" + stderr
         finally:
             if handle:
                 try:
-                    exited = False
-                    if completed:
+                    if completed and not exited:
                         try:
                             observed = _orca("terminal", "wait", "--terminal", handle,
                                              "--for", "exit", "--timeout-ms", "5000", timeout=10)
@@ -266,7 +266,7 @@ def run_turn(agent: str, role: str, model: str, effort: str | None,
                         except (OrcaError, subprocess.SubprocessError):
                             pass  # the close below must then prove it stopped the PTY
                     closed = _orca("terminal", "close", "--terminal", handle, timeout=30)
-                    if closed.get("close", {}).get("ptyKilled") is not True and not exited:
+                    if closed.get("close", {}).get("ptyKilled") is not True and not (completed and exited):
                         raise OrcaError("Orca did not confirm that the terminal stopped")
                     settled = True
                 except Exception as e:

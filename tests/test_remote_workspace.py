@@ -45,7 +45,8 @@ def test_workspace_config_selects_remote_jobs_and_local_agents(tmp_path):
     assert m.workspace and m.delivery == "ssh"
     assert (m.remote_host, m.remote_workdir, m.remote_env_file) == (
         "gpu", "/data/ldc/forge kernel", "/opt/env.sh")
-    assert workspace.load_workspace(tmp_path, {"FK_WORKSPACE_HOST": "other"}).host == "other"
+    override = load_machine(tmp_path, environ={"FK_WORKSPACE_HOST": "other"})
+    assert override.remote_host == override.workspace.host == "other"
 
 
 @pytest.mark.parametrize("values", [
@@ -58,21 +59,6 @@ def test_workspace_config_selects_remote_jobs_and_local_agents(tmp_path):
 def test_invalid_workspace_is_refused(tmp_path, values):
     with pytest.raises(MachineError):
         load_machine(tmp_path, environ=values)
-
-
-def test_remote_shell_preserves_arguments_env_and_exit_code(tmp_path):
-    root = tmp_path / "remote checkout's directory"
-    directory = root / "op/run/jobs/op"
-    env_file = tmp_path / "remote env.sh"
-    env_file.write_text("cd /tmp\nexport FROM_ENV_SCRIPT=yes\n")
-    config = workspace.SshWorkspace("gpu", str(root), str(env_file), sys.executable)
-    script = ('import os, sys; assert os.environ["FROM_ENV_SCRIPT"] == "yes"; '
-              'assert sys.argv[1] == "kernel; $(touch injected)"; '
-              'assert os.getcwd() == sys.argv[2]; raise SystemExit(7)')
-    command = config.command([sys.executable, "-c", script, "kernel; $(touch injected)", str(directory)], str(directory))
-    assert subprocess.run(["sh", "-c", command[-1]]).returncode == 7
-    assert not (directory / "injected").exists()
-    assert "-m forgekernel" not in command[-1]
 
 
 def test_cli_reads_local_tasks_without_launching_remote_forge(tmp_path, monkeypatch, capsys):
@@ -97,7 +83,7 @@ def test_sync_removes_stale_files_and_never_transfers_agent_credentials(tmp_path
     (local / "submit.local.toml").write_text('FK_REF_KEY="secret"')
     (local / "local.env").write_text("XAI_API_KEY=secret")
     (local / "outside-link").symlink_to(local / "local.env")
-    remote = workspace.SshWorkspace("gpu", str(tmp_path / "remote"), python=sys.executable)
+    remote = workspace.SshWorkspace("gpu", str(tmp_path / "remote's $(literal)"), python=sys.executable)
     target = Path(remote.run_dir("op", "run")) / "ws"
     remote.sync_tree(local, str(target))
     (local / "kernel.py").write_text("version 2")
@@ -130,16 +116,15 @@ def test_local_run_and_remote_mirrors_are_grouped_per_operator(tmp_path, monkeyp
     first, second = runs.new_run(task, machine=m), runs.new_run(task, machine=m)
     assert first.dir.parent == second.dir.parent == tmp_path / "local-runs/rmsnorm"
     assert first.dir != second.dir
-    workspace.sync_run(first, m)
-    context = workspace.run_context(first, m)
-    target = Path(context["run_dir"])
+    target = Path(m.workspace.run_dir(first.task_name, first.name))
     assert target.parent == tmp_path / "remote/rmsnorm"
-    assert json.loads((target / "state/run.json").read_text())["id"] == first.id
-    first.ws.mkdir()
-    (first.ws / "kernel.py").write_text("student kernel")
-    monkeypatch.setenv(workspace.CONTEXT_ENV, json.dumps(context))
-    workspace.sync_agent_workspace(first.ws)
-    assert (target / "ws/kernel.py").read_text() == "student kernel"
+    with launch._entered(first, m):
+        assert json.loads((target / "state/run.json").read_text())["id"] == first.id
+        first.ws.mkdir()
+        (first.ws / "kernel.py").write_text("student kernel")
+        workspace.sync_agent_workspace(first.ws)
+        assert (target / "ws/kernel.py").read_text() == "student kernel"
+    assert workspace.ACTIVE_RUN.get() is None
     assert {r.dir for r in runs.list_runs()} == {first.dir, second.dir}
 
 
@@ -152,7 +137,7 @@ def test_gpu_jobs_use_the_same_operator_directory_and_root_gpu_lock(tmp_path):
         tree.mkdir(parents=True)
         taskcard.write_submit(tree, task, m)
         cfg = load_config(op, base_dir=run.dir)
-        assert cfg.exec_workspace == workspace.run_context(run, m)["run_dir"]
+        assert cfg.exec_workspace == m.workspace.run_dir(task.name, run.name)
         assert remote_tree(cfg) == cfg.exec_workspace + "/jobs/" + op
         assert str(tmp_path / "remote/.gpu0.lock") in DirectRunner(cfg)._exec_cmd("all")
 

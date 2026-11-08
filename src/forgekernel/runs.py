@@ -131,10 +131,9 @@ def new_run(task, *, root: Path | None = None, machine=None, now=time.time) -> R
         "status": STATUS_CREATED,
     }
     if machine is not None and machine.workspace:
-        from forgekernel.workspace import SshWorkspace
         rec["remote_workspace"] = {
             "host": machine.remote_host,
-            "directory": SshWorkspace(machine.remote_host, machine.remote_workdir).run_dir(task.name, d.name),
+            "directory": machine.workspace.run_dir(task.name, d.name),
         }
     _write_json(d / RUN_FILE, rec)
     return Run(dir=d, task_name=task.name, id=rid)

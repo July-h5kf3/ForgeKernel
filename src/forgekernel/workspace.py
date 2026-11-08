@@ -2,21 +2,21 @@
 from __future__ import annotations
 
 import io
-import json
 import os
 import re
 import shlex
 import subprocess
 import tarfile
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from forgekernel.localenv import MachineError, read_env_file
-from forgekernel.paths import repo_root
+from forgekernel.localenv import MachineError
 
 KEYS = ("FK_WORKSPACE_HOST", "FK_WORKSPACE_DIR", "FK_WORKSPACE_ENV_FILE",
         "FK_WORKSPACE_PYTHON")
-CONTEXT_ENV = "FORGEKERNEL_REMOTE_WORKSPACE"
+# Agent and reference-generation callbacks sync from the controller after the turn.
+ACTIVE_RUN = ContextVar("forgekernel_ssh_run", default=None)
 _PRIVATE = {".git", ".claude", ".codex", ".grok", ".agents", ".jobs", ".exec", "__pycache__"}
 
 # Only marked, controller-owned mirrors can be replaced. A failed extraction
@@ -73,21 +73,6 @@ class SshWorkspace:
                 raise WorkspaceError(f"invalid workspace path component: {part!r}")
         return str(PurePosixPath(self.directory) / operator / run)
 
-    def command(self, args: list[str], directory: str) -> list[str]:
-        """An explicit remote command; never launches the ForgeKernel CLI."""
-        self._check_target(directory)
-        steps = [f"mkdir -p {shlex.quote(directory)}"]
-        if self.env_file:
-            steps.append(f". {shlex.quote(self.env_file)}")
-        steps.append(f"cd {shlex.quote(directory)}")
-        steps.append("exec " + shlex.join(args))
-        return self._ssh(" && ".join(steps))
-
-    def _ssh(self, command: str) -> list[str]:
-        return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
-                "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=6",
-                "--", self.host, command]
-
     def _check_target(self, target: str) -> None:
         path, root = PurePosixPath(target), PurePosixPath(self.directory)
         if ".." in path.parts or path == root or root not in path.parents:
@@ -110,8 +95,11 @@ class SshWorkspace:
                         continue
                     archive.add(path, arcname=str(path.relative_to(source)), recursive=False)
         command = shlex.join([self.python, "-c", _RECEIVE, target])
+        argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
+                "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=6",
+                "--", self.host, command]
         try:
-            result = subprocess.run(self._ssh(command), input=payload.getvalue(),
+            result = subprocess.run(argv, input=payload.getvalue(),
                                     capture_output=True, timeout=120)
         except (OSError, subprocess.SubprocessError) as e:
             raise WorkspaceError(f"workspace sync to {self.host}:{target} failed: {e}") from e
@@ -122,10 +110,8 @@ class SshWorkspace:
             raise WorkspaceError(f"workspace sync to {self.host}:{target} was not acknowledged")
 
 
-def load_workspace(root: Path | None = None, environ=None) -> SshWorkspace | None:
-    env = os.environ if environ is None else environ
-    file_env = read_env_file((root or repo_root()) / "local.env")
-    values = {k: str(env.get(k, file_env.get(k, ""))).strip() for k in KEYS}
+def parse_workspace(env: dict) -> SshWorkspace | None:
+    values = {k: str(env.get(k, "")).strip() for k in KEYS}
     host, directory, env_file, python = (values[k] for k in KEYS)
     if not any(values.values()):
         return None
@@ -144,31 +130,21 @@ def load_workspace(root: Path | None = None, environ=None) -> SshWorkspace | Non
     return SshWorkspace(host, directory, env_file, python or "python3")
 
 
-def run_context(run, machine) -> dict | None:
-    if not machine.workspace:
-        return None
-    remote = SshWorkspace(machine.remote_host, machine.remote_workdir,
-                          machine.remote_env_file, machine.env.get("FK_WORKSPACE_PYTHON") or "python3")
-    return {"host": remote.host, "directory": remote.directory,
-            "env_file": remote.env_file, "python": remote.python,
-            "run_dir": remote.run_dir(run.task_name, run.name), "local_run": str(run.dir.resolve())}
-
-
 def sync_run(run, machine) -> None:
-    context = run_context(run, machine)
-    if context is None:
+    remote = machine.workspace
+    if remote is None:
         return
-    remote = SshWorkspace(**{k: context[k] for k in ("host", "directory", "env_file", "python")})
-    remote.sync_tree(run.dir, context["run_dir"] + "/state", exclude_top=("ws", "operators"))
+    target = remote.run_dir(run.task_name, run.name)
+    remote.sync_tree(run.dir, target + "/state", exclude_top=("ws", "operators"))
     if run.ws.is_dir():
-        remote.sync_tree(run.ws, context["run_dir"] + "/ws")
+        remote.sync_tree(run.ws, target + "/ws")
 
 
 def sync_agent_workspace(source: Path) -> None:
-    value = os.environ.get(CONTEXT_ENV)
-    if not value:
+    context = ACTIVE_RUN.get()
+    if context is None:
         return
-    context = json.loads(value)
-    relative = Path(source).resolve().relative_to(Path(context["local_run"]))
-    remote = SshWorkspace(**{k: context[k] for k in ("host", "directory", "env_file", "python")})
-    remote.sync_tree(source, str(PurePosixPath(context["run_dir"]) / relative.as_posix()))
+    run, remote = context
+    relative = source.resolve().relative_to(run.dir.resolve())
+    target = PurePosixPath(remote.run_dir(run.task_name, run.name)) / relative.as_posix()
+    remote.sync_tree(source, str(target))

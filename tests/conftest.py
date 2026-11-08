@@ -24,7 +24,6 @@ def _no_truncation_retries(monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_user_ssh_workspace(monkeypatch, tmp_path):
     """A developer's local.env must never send a unit test to a real server."""
-    monkeypatch.setattr(_workspace, "repo_root", lambda: tmp_path)
     monkeypatch.setattr(_localenv, "repo_root", lambda: tmp_path)
-    for key in (*_workspace.KEYS, _workspace.CONTEXT_ENV):
+    for key in _workspace.KEYS:
         monkeypatch.delenv(key, raising=False)

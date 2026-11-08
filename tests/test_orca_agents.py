@@ -20,19 +20,6 @@ from forgekernel.task import AgentSpec, load_task
 from test_task import MINIMAL, _kb, _task
 
 
-def test_task_routes_codex_teacher_and_grok_student(tmp_path):
-    task = load_task(_task(tmp_path, MINIMAL +
-        '[agent.teacher]\nbackend="codex"\nmodel="default"\neffort="high"\n'
-        '[agent.student]\nbackend="grok"\nmodel="default"\n'), kb_root=_kb(tmp_path))
-    for role in ("teacher", "student"):
-        spec = getattr(task, role)
-        command = shlex.split(agents.agent_command(spec, role))
-        assert command[:1] == ["env"] and command[1].startswith("PYTHONPATH=/")
-        assert command[2:5] == [sys.executable, "-m", "forgekernel.orca_agent"]
-        assert command[command.index("--agent") + 1] == spec.backend
-        assert command[command.index("--role") + 1] == role
-
-
 @pytest.mark.parametrize("teacher", task_module.BACKENDS)
 @pytest.mark.parametrize("student", task_module.BACKENDS)
 def test_both_roles_choose_harness_model_effort_and_timeout_independently(tmp_path, teacher, student):
@@ -50,6 +37,10 @@ def test_both_roles_choose_harness_model_effort_and_timeout_independently(tmp_pa
         if backend == "claude":
             assert command[2:] == [spec.model, effort, str(timeout)]
         else:
+            assert command[0] == "env" and command[1].startswith("PYTHONPATH=/")
+            assert command[2:5] == [sys.executable, "-m", "forgekernel.orca_agent"]
+            assert command[command.index("--agent") + 1] == spec.backend
+            assert command[command.index("--role") + 1] == role
             assert command[command.index("--model") + 1] == spec.model
             assert command[command.index("--effort") + 1] == effort
             assert command[command.index("--timeout") + 1] == str(timeout)
@@ -85,9 +76,6 @@ def test_changing_harness_does_not_inherit_a_claude_model(tmp_path):
         '[agent.teacher]\nbackend="codex"\n'
         '[agent.student]\nbackend="grok"\n'), kb_root=_kb(tmp_path))
     assert task.teacher.model == task.student.model == "default"
-    shared = load_task(_task(tmp_path, MINIMAL + '[agent]\nbackend="codex"\n', name="shared"),
-                       kb_root=tmp_path / "repo")
-    assert shared.teacher.model == shared.student.model == "default"
 
 
 @pytest.mark.parametrize("agent,key", [("codex", "FK_CODEX_BIN"), ("grok", "FK_GROK_BIN"),
@@ -133,8 +121,6 @@ elif args[:2] == ["terminal", "wait"]:
     time.sleep(0.03)
     print(json.dumps({"ok": False, "error": {"code": "timeout", "message": "timeout"}}))
     sys.exit(1)
-elif args[:2] == ["terminal", "read"]:
-    result = {"terminal": {"status": "running"}}
 elif args[:2] == ["terminal", "close"]:
     try:
         os.killpg(int((state / "pid").read_text()), signal.SIGTERM)
@@ -267,7 +253,7 @@ def test_an_already_exited_orca_terminal_is_not_reported_as_uncertain(transport,
     policy.install("teacher", ws)
     actual = orca_agent._orca
     def observed(*args, **kw):
-        if args[:2] == ("terminal", "wait"):
+        if args[:2] == ("terminal", "wait") and "5000" in args:
             return {"wait": {"satisfied": True}}
         if args[:2] == ("terminal", "close"):
             return {"close": {"ptyKilled": False}}
@@ -306,7 +292,8 @@ def test_uncertain_transport_does_not_relaunch_the_agent(tmp_path, monkeypatch):
     assert len(calls) == 1
 
 
-def test_uncertain_launch_preserves_private_state(transport, tmp_path, monkeypatch):
+@pytest.mark.parametrize("missing", ("launch receipt", "worker result"))
+def test_uncertain_turn_preserves_private_state(transport, tmp_path, monkeypatch, missing):
     ws, policy, _, _ = transport
     policy.install("teacher", ws)
     spool = tmp_path / "private-spool"
@@ -316,7 +303,13 @@ def test_uncertain_launch_preserves_private_state(transport, tmp_path, monkeypat
     def lost(*args, **kw):
         calls.append(args[:2])
         if args[:2] == ("terminal", "create"):
-            raise subprocess.TimeoutExpired("orca", 60)
+            if missing == "launch receipt":
+                raise subprocess.TimeoutExpired("orca", 60)
+            return {"terminal": {"handle": "owned-terminal"}}
+        if args[:2] == ("terminal", "wait"):
+            return {"wait": {"satisfied": True}}
+        if args[:2] == ("terminal", "close"):
+            return {"close": {"ptyKilled": False}}
         return {}
     monkeypatch.setattr(orca_agent, "_orca", lost)
     with pytest.raises(orca_agent.OrcaError, match="FK_AGENT_UNCERTAIN"):

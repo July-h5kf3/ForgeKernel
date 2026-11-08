@@ -28,8 +28,12 @@ import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from forgekernel.paths import repo_root
+
+if TYPE_CHECKING:
+    from forgekernel.workspace import SshWorkspace
 
 LOCAL_ENV = "local.env"
 DELIVERY_LOCAL = "local"
@@ -53,8 +57,8 @@ class Machine:
     remote_host: str = ""
     remote_workdir: str = ""
     remote_env_file: str = ""
-    workspace: bool = False
     env: dict = field(default_factory=dict)   # every KEY=VALUE the file sets (merged)
+    workspace: SshWorkspace | None = None
 
     def describe(self) -> str:
         if self.delivery == DELIVERY_SSH:
@@ -101,7 +105,7 @@ def load_machine(root: str | Path | None = None, environ=None) -> Machine:
     environ = os.environ if environ is None else environ
     file_env = read_env_file(Path(root if root is not None else repo_root()) / LOCAL_ENV)
     merged = dict(file_env)
-    from forgekernel.workspace import KEYS, load_workspace
+    from forgekernel.workspace import KEYS, parse_workspace
     for k in list(file_env) + ["FK_DELIVERY", "FK_GPU", "REMOTE_HOST", "REMOTE_WORKDIR",
                                "REMOTE_ENV_FILE", *KEYS]:
         if k in environ:
@@ -116,7 +120,7 @@ def load_machine(root: str | Path | None = None, environ=None) -> Machine:
     host = (merged.get("REMOTE_HOST") or "").strip()
     workdir = (merged.get("REMOTE_WORKDIR") or "").strip()
     env_file = (merged.get("REMOTE_ENV_FILE") or "").strip()
-    workspace = load_workspace(Path(root) if root is not None else None, environ=merged)
+    workspace = parse_workspace(merged)
     if workspace is not None:
         delivery, host, workdir, env_file = (DELIVERY_SSH, workspace.host, workspace.directory,
                                             workspace.env_file)
@@ -131,4 +135,4 @@ def load_machine(root: str | Path | None = None, environ=None) -> Machine:
     if problems:
         raise MachineError(problems)
     return Machine(delivery=delivery, gpu=gpu, remote_host=host, remote_workdir=workdir,
-                   remote_env_file=env_file, workspace=workspace is not None, env=merged)
+                   remote_env_file=env_file, workspace=workspace, env=merged)

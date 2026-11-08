@@ -312,20 +312,16 @@ def _entered(run, machine):
     """While the run is driven, this process and everything it starts work on the run's
     trees with local.env's credentials, and its output goes to run.log as well; both are
     put back afterwards."""
-    context = workspace_mod.run_context(run, machine)
-    saved_env = {k: os.environ.get(k) for k in [OPERATORS_ENV, workspace_mod.CONTEXT_ENV, *machine.env]}
+    saved_env = {k: os.environ.get(k) for k in [OPERATORS_ENV, *machine.env]}
     saved_out, saved_err = sys.stdout, sys.stderr
     os.environ[OPERATORS_ENV] = str(run.operators_dir)
     for k, v in machine.env.items():
         if v:       # an empty KEY= line (local.env.example) must not blank a login
             os.environ.setdefault(k, v)
-    if context:
-        os.environ[workspace_mod.CONTEXT_ENV] = json.dumps(context)
-    else:
-        os.environ.pop(workspace_mod.CONTEXT_ENV, None)
     if not isinstance(sys.stdout, _Tee):
         sys.stdout = _Tee(sys.stdout, run.log)
         sys.stderr = _Tee(sys.stderr, run.log)
+    token = workspace_mod.ACTIVE_RUN.set((run, machine.workspace) if machine.workspace else None)
     entered = False
     try:
         workspace_mod.sync_run(run, machine)
@@ -344,6 +340,7 @@ def _entered(run, machine):
                     raise
                 sys.stderr.write(f"[forge] final workspace sync failed: {e}\n")
         finally:
+            workspace_mod.ACTIVE_RUN.reset(token)
             sys.stdout, sys.stderr = saved_out, saved_err
             for k, v in saved_env.items():
                 if v is None:
