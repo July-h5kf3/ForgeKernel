@@ -269,6 +269,26 @@ def test_missing_policy_is_refused_before_contacting_orca(transport):
     assert not (transport[2] / "calls.jsonl").exists()
 
 
+def test_slow_orca_wait_keeps_the_active_turn(transport, monkeypatch):
+    ws, policy, state, _ = transport
+    policy.install("teacher", ws)
+    actual = orca_agent._orca
+    missed = False
+
+    def observed(*args, **kw):
+        nonlocal missed
+        if args[:2] == ("terminal", "wait") and "1000" in args and not missed:
+            missed = True
+            raise subprocess.TimeoutExpired("orca", 10)
+        return actual(*args, **kw)
+
+    monkeypatch.setattr(orca_agent, "_orca", observed)
+    rc, answer, error = orca_agent.run_turn("codex", "teacher", "default", None, 10, "p")
+    calls = [json.loads(line)[:2] for line in (state / "calls.jsonl").read_text().splitlines()]
+    assert missed and calls.count(["terminal", "create"]) == 1
+    assert rc == 0 and answer == "codex final", error
+
+
 def test_worker_propagates_native_failure_and_timeout(transport, tmp_path):
     ws, policy, _, native = transport
     policy.install("teacher", ws)

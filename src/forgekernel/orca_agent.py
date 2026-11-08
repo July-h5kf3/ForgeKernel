@@ -246,8 +246,12 @@ def run_turn(agent: str, role: str, model: str, effort: str | None,
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise OrcaError("Orca worker did not return a result before its deadline")
-                observed = _orca("terminal", "wait", "--terminal", handle, "--for", "exit",
-                                 "--timeout-ms", str(max(1, min(1000, int(remaining * 1000)))), timeout=10)
+                try:
+                    observed = _orca("terminal", "wait", "--terminal", handle, "--for", "exit",
+                                     "--timeout-ms", str(max(1, min(1000, int(remaining * 1000)))), timeout=10)
+                except subprocess.TimeoutExpired:
+                    # A missed status poll does not invalidate this terminal or its result.
+                    continue
                 exited = observed.get("wait", {}).get("satisfied") is True
                 if exited and not result_path.is_file():
                     raise OrcaError("Orca worker exited without a result; check its terminal log")
