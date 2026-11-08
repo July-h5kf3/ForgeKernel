@@ -50,11 +50,13 @@ def test_derive_reference_tokens_from_oracle_tree(tmp_path):
     (o / "ref_persistent_gemm.py").write_text(
         "def _compute_epi_tile_override(x):\n    pass\n\ndef main():\n    pass\n")
     (o / "sched.cuh").write_text("// scheduler\n")
+    (o / "run.py").write_text("def run():\n    pass\n")
     toks = derive_reference_tokens(o)
     assert "ref_persistent_gemm.py" in toks and "ref_persistent_gemm" in toks
     assert "_compute_epi_tile_override" in toks
     assert "sched.cuh" in toks
     assert "main" not in toks  # generic/short names are not retrieval keys
+    assert "run.py" not in toks
     assert lint_text("- the epilogue extracted from ref_persistent_gemm.py", "e.md",
                      extra_tokens=toks)
     assert not lint_text("- the epilogue extracted from ref_persistent_gemm.py", "e.md")

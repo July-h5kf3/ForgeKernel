@@ -116,7 +116,7 @@ REFERENCE_TOKENS = [
 _DERIVE_STOPLIST = {
     "forward", "backward", "kernel", "kernels", "common", "config", "configs",
     "helpers", "launch", "params", "static", "template", "test", "tests",
-    "utils", "wrapper", "interface", "benchmark", "setup", "schedule",
+    "utils", "wrapper", "interface", "benchmark", "setup", "schedule", "run",
     # CuTe DSL idioms every warp-specialized kernel spells the same way — a KB
     # entry naming them cites the DSL, not the reference.
     "sharedstorage", "namedbarrier",
