@@ -1087,7 +1087,7 @@ class Generation:
 
 def _end_group(proc: subprocess.Popen) -> None:
     from forgekernel.loop.cli import _end_process_group
-    _end_process_group(proc)
+    _end_process_group(proc, grace_s=35.0)
 
 
 def generate(g: Generation, resume: dict | None = None) -> dict:
@@ -1258,11 +1258,18 @@ def _run_session(g: Generation, state: dict, svc: Service, ws: Path, task: str) 
                 save_state(g.op_dir, state)
                 raise
         rc = proc.wait()
+        from forgekernel.workspace import sync_agent_workspace
+        sync_agent_workspace(ws)
         svc.serve_pending()
         rec.update(end=g.now(), rc=rc, outcome=_leg_outcome(paths.turn))
         save_state(g.op_dir, state)
         g.log(f"attempt {k} ended rc={rc} ({rec['outcome'] or 'no leg result'}; "
               f"{svc.summary_line()})")
+        diagnostic = err_p.read_text(encoding="utf-8", errors="replace")
+        if "FK_AGENT_UNCERTAIN" in diagnostic:
+            _fail(g, state, "FK_AGENT_UNCERTAIN: inspect the preserved Orca turn before retrying")
+        if "FK_AGENT_UNSUPPORTED" in diagnostic:
+            _fail(g, state, diagnostic.strip()[-1000:])
         if rc != 0 and rec["end"] - rec["start"] < 120 and g.now() < deadline:
             g.sleep(min(600.0, 60.0 * k, max(0.0, deadline - g.now())))
 
@@ -1396,7 +1403,7 @@ def _accepted(g: Generation, state: dict, svc: Service, cand: dict, runs: list,
         "bar_met": all(r.get("bar_met") for r in runs),
     }
     state.update(status=STATUS_ACCEPTED, accepted=accepted, acceptance=tried)
-    state["arch"] = arch_decision(g.cfg, g.target_ms, accepted, g.settings)
+    state["arch"] = arch_decision(g.cfg, g.target_ms, accepted)
     save_state(g.op_dir, state)
     g.log(f"ACCEPTED candidate {cand['n']:03d}: {best['reading_ms']:.6g} ms "
           f"({g.gate_window}), oracle = {', '.join(files)}; target: {state['arch']['why']}")

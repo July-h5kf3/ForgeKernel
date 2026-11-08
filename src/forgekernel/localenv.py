@@ -11,6 +11,10 @@ Keys the harness reads:
     REMOTE_HOST      ssh: host alias; must log in non-interactively
     REMOTE_WORKDIR   ssh: absolute directory on the host, dedicated to forgekernel
     REMOTE_ENV_FILE  ssh, optional: sourced on the host before every command
+    FK_WORKSPACE_HOST / FK_WORKSPACE_DIR
+                    persistent SSH workspace; controller and agents stay local
+    FK_WORKSPACE_ENV_FILE / FK_WORKSPACE_PYTHON
+                    remote GPU environment script and file-transfer Python
 
 Every key in the file (credentials such as ``ANTHROPIC_API_KEY`` or
 ``CLAUDE_CODE_OAUTH_TOKEN`` included) is exported to the agents and the GPU jobs a run
@@ -24,8 +28,12 @@ import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from forgekernel.paths import repo_root
+
+if TYPE_CHECKING:
+    from forgekernel.workspace import SshWorkspace
 
 LOCAL_ENV = "local.env"
 DELIVERY_LOCAL = "local"
@@ -50,6 +58,7 @@ class Machine:
     remote_workdir: str = ""
     remote_env_file: str = ""
     env: dict = field(default_factory=dict)   # every KEY=VALUE the file sets (merged)
+    workspace: SshWorkspace | None = None
 
     def describe(self) -> str:
         if self.delivery == DELIVERY_SSH:
@@ -96,8 +105,9 @@ def load_machine(root: str | Path | None = None, environ=None) -> Machine:
     environ = os.environ if environ is None else environ
     file_env = read_env_file(Path(root if root is not None else repo_root()) / LOCAL_ENV)
     merged = dict(file_env)
+    from forgekernel.workspace import KEYS, parse_workspace
     for k in list(file_env) + ["FK_DELIVERY", "FK_GPU", "REMOTE_HOST", "REMOTE_WORKDIR",
-                               "REMOTE_ENV_FILE"]:
+                               "REMOTE_ENV_FILE", *KEYS]:
         if k in environ:
             merged[k] = environ[k]
     problems: list[str] = []
@@ -110,6 +120,10 @@ def load_machine(root: str | Path | None = None, environ=None) -> Machine:
     host = (merged.get("REMOTE_HOST") or "").strip()
     workdir = (merged.get("REMOTE_WORKDIR") or "").strip()
     env_file = (merged.get("REMOTE_ENV_FILE") or "").strip()
+    workspace = parse_workspace(merged)
+    if workspace is not None:
+        delivery, host, workdir, env_file = (DELIVERY_SSH, workspace.host, workspace.directory,
+                                            workspace.env_file)
     if delivery == DELIVERY_SSH:
         if not host:
             problems.append("FK_DELIVERY=ssh needs REMOTE_HOST (an ssh alias that logs in "
@@ -121,4 +135,4 @@ def load_machine(root: str | Path | None = None, environ=None) -> Machine:
     if problems:
         raise MachineError(problems)
     return Machine(delivery=delivery, gpu=gpu, remote_host=host, remote_workdir=workdir,
-                   remote_env_file=env_file, env=merged)
+                   remote_env_file=env_file, workspace=workspace, env=merged)

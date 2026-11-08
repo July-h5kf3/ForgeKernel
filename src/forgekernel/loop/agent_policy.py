@@ -365,7 +365,11 @@ class AgentPolicy:
                     f"[agent-policy] moved a pre-existing {settings_path} aside to "
                     f"{backup.name}; the harness owns this file from now on\n")
         policy_path.write_text(
-            json.dumps(self.policy_document(role), indent=1, ensure_ascii=False) + "\n",
+            json.dumps({**self.policy_document(role), "native": {
+                "deny_read": [str(p) for p in self._deny_paths(role, workspace)],
+                "deny_write": [str(p) for p in self._deny_write_paths(workspace)],
+                "allow_write": [str(p) for p in self.allow_write(role)],
+            }}, indent=1, ensure_ascii=False) + "\n",
             encoding="utf-8")
         settings_path.write_text(
             json.dumps(self.settings(role, workspace), indent=1, ensure_ascii=False) + "\n",
@@ -374,6 +378,9 @@ class AgentPolicy:
         from forgekernel import skills
         skills.mirror(workspace)
         _git_exclude(workspace, ".claude/")
+        _git_exclude(workspace, ".grok/")
+        _git_exclude(workspace, ".codex/")
+        _git_exclude(workspace, ".agents/")
         return settings_path
 
 
